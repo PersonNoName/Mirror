@@ -1,7 +1,12 @@
-from typing import Literal, Optional
+import re
+from typing import TYPE_CHECKING, Optional
+
 from domain.memory import CoreMemory
 from core.memory_cache import CoreMemoryCache
 from core.vector_retriever import VectorRetriever
+
+if TYPE_CHECKING:
+    from services.llm import LLMInterface
 
 
 TOKEN_BUDGET_CONFIG = {
@@ -73,9 +78,11 @@ class SoulEngine:
         self,
         core_memory_cache: CoreMemoryCache,
         vector_retriever: VectorRetriever,
+        llm: "LLMInterface",
     ):
         self.core_memory_cache = core_memory_cache
         self.vector_retriever = vector_retriever
+        self._llm = llm
         self.token_budget = TOKEN_BUDGET_CONFIG
 
     async def build_prompt(
@@ -175,9 +182,35 @@ class SoulEngine:
         return "\n".join([f"- {adapt}" for adapt in adaptations])
 
     async def think(self, prompt: str) -> dict:
-        print("[SoulEngine] LLM推理占位 - 实际调用LLM API")
+        response = await self._llm.generate(prompt)
+        if not response:
+            print("[SoulEngine] LLM returned empty response")
+            return {
+                "inner_thoughts": "LLM调用失败",
+                "action": "direct_reply",
+                "content": "抱歉，推理引擎暂时不可用。",
+            }
+
+        inner_thoughts = self._extract_tag(response, "inner_thoughts")
+        action = self._extract_tag(response, "action")
+        content = self._extract_tag(response, "content")
+
+        valid_actions = {"direct_reply", "tool_call", "publish_task", "hitl_relay"}
+        if action not in valid_actions:
+            print(
+                f"[SoulEngine] Invalid action '{action}' from LLM, defaulting to direct_reply"
+            )
+            action = "direct_reply"
+
         return {
-            "inner_thoughts": "占位：LLM推理结果",
-            "action": "direct_reply",
-            "content": "占位：回复内容",
+            "inner_thoughts": inner_thoughts or "（无）",
+            "action": action,
+            "content": content or "",
         }
+
+    def _extract_tag(self, text: str, tag: str) -> Optional[str]:
+        pattern = rf"<{tag}>\s*(.*?)\s*</{tag}>"
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        return None

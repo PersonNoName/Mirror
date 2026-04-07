@@ -1,10 +1,15 @@
-from typing import Optional
+import json
+from typing import TYPE_CHECKING
+
 from domain.evolution import VectorEntry
+
+if TYPE_CHECKING:
+    from services.graph_db import GraphDBClient
+    from services.vector_db import VectorDBClient
+    from services.llm import LLMInterface
 
 
 class VectorDBInterfaceDummy:
-    """VectorDB 占位实现"""
-
     async def insert(self, entry: VectorEntry) -> None:
         print(f"[VectorDB] insert: namespace={entry.namespace}")
 
@@ -15,21 +20,6 @@ class VectorDBInterfaceDummy:
         top_k: int = 8,
     ) -> list[VectorEntry]:
         return []
-
-
-class LLMInterfaceDummy:
-    """LLM 调用占位实现"""
-
-    async def generate(self, prompt: str) -> list[dict]:
-        print(f"[LLM] 知识抽取调用（占位）")
-        return [
-            {
-                "subject": "用户",
-                "relation": "PREFERS",
-                "object": "Python",
-                "confidence": 0.9,
-            }
-        ]
 
 
 KNOWLEDGE_EXTRACTION_PROMPT = """
@@ -62,72 +52,83 @@ class ObserverEngine:
 
     def __init__(
         self,
-        graph_db: Optional[VectorDBInterfaceDummy] = None,
-        vector_db: Optional[VectorDBInterfaceDummy] = None,
-        llm_lite: Optional[LLMInterfaceDummy] = None,
+        graph_db: "GraphDBClient",
+        vector_db: "VectorDBClient",
+        llm_lite: "LLMInterface",
     ):
-        self.graph_db = graph_db or VectorDBInterfaceDummy()
-        self.vector_db = vector_db or VectorDBInterfaceDummy()
-        self.llm_lite = llm_lite or LLMInterfaceDummy()
+        self._graph_db = graph_db
+        self._vector_db = vector_db
+        self._llm = llm_lite
         self._batch: list[dict] = []
 
     async def process(self, dialogue: list[dict], session_id: str) -> None:
-        """
-        处理对话，提取知识三元组并写入存储。
-        """
         if not await self._is_salient(dialogue):
             print("[Observer] 对话不够显著，跳过")
             return
 
         knowledge_triplets = await self._extract_knowledge(dialogue)
+        if not knowledge_triplets:
+            print("[Observer] 未抽取到知识三元组")
+            return
+
         for triplet in knowledge_triplets:
             await self._write_to_graph(triplet)
             await self._write_to_vector(triplet, session_id)
 
     async def _is_salient(self, dialogue: list[dict]) -> bool:
-        """
-        判断对话是否足够显著，值得提取知识。
-        简化实现：超过3轮对话即认为显著。
-        """
         return len(dialogue) > 3
 
     async def _extract_knowledge(self, dialogue: list[dict]) -> list[dict]:
-        """
-        调用 LLM 抽取知识三元组。
-        """
         dialogue_text = "\n".join(
             f"{msg.get('role', 'unknown')}: {msg.get('content', '')}"
             for msg in dialogue
         )
 
         prompt = KNOWLEDGE_EXTRACTION_PROMPT.format(dialogue=dialogue_text)
-        result = await self.llm_lite.generate(prompt)
+        response = await self._llm.generate(prompt)
 
-        if isinstance(result, str):
-            import json
+        if not response:
+            print("[Observer] LLM returned empty response")
+            return []
 
-            try:
-                result = json.loads(result)
-            except json.JSONDecodeError:
-                return []
-
-        return result if isinstance(result, list) else []
+        try:
+            parsed = json.loads(response)
+            if isinstance(parsed, list):
+                return parsed
+            print(f"[Observer] LLM returned non-list JSON: {type(parsed)}")
+            return []
+        except json.JSONDecodeError as e:
+            print(f"[Observer] Failed to parse LLM JSON response: {e}")
+            return []
 
     async def _write_to_graph(self, triplet: dict) -> None:
-        """
-        写入 Graph DB。
-        """
-        print(
-            f"[Observer] Graph写入: {triplet.get('subject')} - "
-            f"{triplet.get('relation')} - {triplet.get('object')} "
-            f"(conf={triplet.get('confidence', 0.5)})"
-        )
+        subject = triplet.get("subject")
+        relation = triplet.get("relation")
+        object = triplet.get("object")
+        confidence = triplet.get("confidence", 0.5)
+        is_pinned = triplet.get("is_pinned", False)
+
+        if not all([subject, relation, object]):
+            print(f"[Observer] Incomplete triplet, skipping graph write: {triplet}")
+            return
+
+        try:
+            await self._graph_db.upsert_relation(
+                subject=subject,
+                relation=relation,
+                object=object,
+                confidence=confidence,
+                is_pinned=is_pinned,
+            )
+            print(
+                f"[Observer] Graph写入: {subject} - {relation} - {object} "
+                f"(conf={confidence}, pinned={is_pinned})"
+            )
+        except Exception as e:
+            print(f"[Observer] Graph写入失败: {e}")
 
     async def _write_to_vector(self, triplet: dict, session_id: str) -> None:
-        """
-        写入 Vector DB。
-        """
-        content = f"{triplet.get('subject')} {triplet.get('relation')} {triplet.get('object')}"
+        content = f"{triplet.get('subject', '')} {triplet.get('relation', '')} {triplet.get('object', '')}"
         entry = VectorEntry(
             content=content,
             namespace="experience",
@@ -137,4 +138,8 @@ class ObserverEngine:
                 "confidence": triplet.get("confidence", 0.5),
             },
         )
-        await self.vector_db.insert(entry)
+        try:
+            await self._vector_db.insert(entry)
+            print(f"[Observer] Vector写入: {content[:50]}...")
+        except Exception as e:
+            print(f"[Observer] Vector写入失败: {e}")

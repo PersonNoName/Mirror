@@ -1,29 +1,14 @@
-from typing import Optional
+import json
+from typing import TYPE_CHECKING, Optional
+
 from domain.evolution import Lesson
 from domain.task import Task
 
-
-class LLMInterfaceDummy:
-    """LLM 调用占位实现"""
-
-    async def generate(self, prompt: str) -> dict:
-        print(f"[LLM] 反思生成调用（占位）")
-        return {
-            "confidence": 0.6,
-            "root_cause": "mock_root_cause",
-            "lesson": "mock_lesson",
-            "domain": "general",
-            "is_agent_capability_issue": False,
-        }
+if TYPE_CHECKING:
+    from services.llm import LLMInterface
 
 
-class MetaCognitionReflector:
-    """
-    元认知反思器：从任务完成/失败中归因生成 Lesson。
-    订阅 task_completed (P1) 和 task_failed (P0，立即触发)。
-    """
-
-    REFLECTION_PROMPT_TEMPLATE = """
+REFLECTION_PROMPT_TEMPLATE = """
 任务执行结果：
 - 任务ID: {task_id}
 - 任务状态: {outcome}
@@ -48,17 +33,18 @@ class MetaCognitionReflector:
 置信度低于0.5的反思将被丢弃。
 """
 
-    def __init__(
-        self,
-        llm_lite: Optional[LLMInterfaceDummy] = None,
-    ):
-        self.llm_lite = llm_lite or LLMInterfaceDummy()
+
+class MetaCognitionReflector:
+    """
+    元认知反思器：从任务完成/失败中归因生成 Lesson。
+    订阅 task_completed (P1) 和 task_failed (P0，立即触发)。
+    """
+
+    def __init__(self, llm_lite: "LLMInterface"):
+        self._llm = llm_lite
 
     async def reflect(self, task: Task) -> Optional[Lesson]:
-        """
-        对任务执行结果进行反思，生成 Lesson。
-        """
-        prompt = self.REFLECTION_PROMPT_TEMPLATE.format(
+        prompt = REFLECTION_PROMPT_TEMPLATE.format(
             task_id=task.id,
             task_snapshot=task.prompt_snapshot or "无",
             task_result=task.result or "无",
@@ -67,10 +53,22 @@ class MetaCognitionReflector:
             outcome=task.status,
         )
 
-        result = await self.llm_lite.generate(prompt)
+        response = await self._llm.generate(prompt)
+        if not response:
+            print(
+                f"[MetaCognitionReflector] LLM returned empty response for task {task.id}"
+            )
+            return None
 
-        if result.get("confidence", 0) < 0.5:
-            print(f"[MetaCognitionReflector] 置信度 {result['confidence']} < 0.5，跳过")
+        try:
+            result = json.loads(response)
+        except json.JSONDecodeError as e:
+            print(f"[MetaCognitionReflector] Failed to parse LLM JSON: {e}")
+            return None
+
+        confidence = result.get("confidence", 0)
+        if confidence < 0.5:
+            print(f"[MetaCognitionReflector] Confidence {confidence} < 0.5, skipping")
             return None
 
         lesson = Lesson(
@@ -84,7 +82,11 @@ class MetaCognitionReflector:
             subject=result.get("subject"),
             relation=result.get("relation"),
             object=result.get("object"),
-            confidence=result.get("confidence", 0.5),
+            confidence=confidence,
         )
 
+        print(
+            f"[MetaCognitionReflector] Generated lesson: domain={lesson.domain}, "
+            f"confidence={confidence:.2f}, is_pattern={lesson.is_pattern}"
+        )
         return lesson

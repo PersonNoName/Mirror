@@ -1,30 +1,34 @@
-from typing import Optional
-from domain.memory import SelfCognition, CapabilityEntry, WorldModel
+from typing import TYPE_CHECKING
+
+from domain.memory import CapabilityEntry
 from domain.evolution import Lesson
+
+if TYPE_CHECKING:
+    from core.memory_cache import CoreMemoryCache
+    from interfaces.storage import GraphDBInterface
+    from core.core_memory_scheduler import CoreMemoryScheduler
 
 
 class GraphDBInterfaceDummy:
-    """GraphDB 占位实现"""
-
     async def upsert_relation(
         self,
         subject: str,
         relation: str,
-        obj: str,
+        object: str,
         confidence: float,
         is_pinned: bool = False,
     ) -> None:
-        print(f"[GraphDB] upsert: {subject} - {relation} - {obj} (conf={confidence})")
+        print(
+            f"[GraphDB] upsert: {subject} - {relation} - {object} (conf={confidence})"
+        )
 
-    async def get_relation(self, subject: str, obj: str) -> Optional[dict]:
+    async def get_relation(self, subject: str, object: str) -> dict | None:
         return None
 
 
 class CoreMemorySchedulerDummy:
-    """CoreMemoryScheduler 占位实现"""
-
-    async def write(self, block: str, content: any, event_id: str = None) -> None:
-        print(f"[CoreMemoryScheduler] write block={block}")
+    async def write(self, block: str, content, event_id: str | None = None) -> None:
+        print(f"[CoreMemorySchedulerDummy] write block={block}")
 
 
 class CognitionUpdater:
@@ -37,19 +41,14 @@ class CognitionUpdater:
     def __init__(
         self,
         core_memory_cache: "CoreMemoryCache",
-        graph_db: Optional[GraphDBInterfaceDummy] = None,
-        core_memory_scheduler: Optional[CoreMemorySchedulerDummy] = None,
+        graph_db: "GraphDBInterface",
+        core_memory_scheduler: "CoreMemoryScheduler | None" = None,
     ):
-        from core.memory_cache import CoreMemoryCache
-
-        self.core_memory_cache: CoreMemoryCache = core_memory_cache
-        self.graph_db = graph_db or GraphDBInterfaceDummy()
-        self.core_memory_scheduler = core_memory_scheduler or CoreMemorySchedulerDummy()
+        self.core_memory_cache: "CoreMemoryCache" = core_memory_cache
+        self._graph_db = graph_db
+        self._scheduler = core_memory_scheduler
 
     async def update(self, lesson: Lesson, user_id: str) -> None:
-        """
-        根据 lesson 类型分发更新。
-        """
         if lesson.is_agent_capability_issue:
             await self._update_self_cognition(lesson, user_id)
         elif lesson.is_pattern:
@@ -81,34 +80,35 @@ class CognitionUpdater:
         core_mem.self_cognition = current
         self.core_memory_cache.set(user_id, core_mem)
 
-        await self.core_memory_scheduler.write("self_cognition", current)
+        if self._scheduler:
+            await self._scheduler.write("self_cognition", current)
+        else:
+            print("[CognitionUpdater] No scheduler configured, skipping persist")
 
     async def _update_world_model(self, lesson: Lesson) -> None:
         if not (lesson.subject and lesson.relation and lesson.object):
             print("[CognitionUpdater] Pattern lesson 缺少 subject/relation/object")
             return
 
-        existing = await self.graph_db.get_relation(lesson.subject, lesson.object)
+        existing = await self._graph_db.get_relation(lesson.subject, lesson.object)
         if existing and self._is_conflict(existing, lesson):
             resolved = await self._resolve_conflict(existing, lesson)
-            await self.graph_db.upsert_relation(
+            await self._graph_db.upsert_relation(
                 subject=resolved["subject"],
                 relation=resolved["relation"],
-                obj=resolved["object"],
+                object=resolved["object"],
                 confidence=resolved["confidence"],
             )
         else:
-            await self.graph_db.upsert_relation(
+            await self._graph_db.upsert_relation(
                 subject=lesson.subject,
                 relation=lesson.relation,
-                obj=lesson.object,
+                object=lesson.object,
                 confidence=lesson.confidence,
             )
 
     def _is_conflict(self, existing: dict, lesson: Lesson) -> bool:
-        if existing.get("relation") != lesson.relation:
-            return True
-        return False
+        return existing.get("relation") != lesson.relation
 
     async def _resolve_conflict(self, existing: dict, lesson: Lesson) -> dict:
         existing_conf = existing.get("confidence", 0.5)

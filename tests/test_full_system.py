@@ -4,26 +4,23 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio
-from datetime import datetime
+import json
 
-from domain.task import Task, TaskStatus
+from domain.task import Task
 from domain.memory import CoreMemory, PersonalityState, BehavioralRule
 from domain.evolution import InteractionSignal, Lesson
 
 from core.memory_cache import CoreMemoryCache
-from core.soul_engine import SoulEngine, TOKEN_BUDGET_CONFIG
+from core.soul_engine import SoulEngine
 from core.blackboard import Blackboard
-from core.code_agent import CodeAgent
 
 from events.event_bus import EventBus, EVENT_BUS_CONFIG
 from evolution.signal_extractor import SignalExtractor
 from evolution.personality_evolver import PersonalityEvolver
 from evolution.cognition_updater import CognitionUpdater
 from evolution.evolution_journal import EvolutionJournal
-from evolution.meta_cognition import MetaCognitionReflector
 
 from services.graph_db import GraphDBClient
-from services.vector_db import VectorDBClient
 from core.core_memory_scheduler import CoreMemoryScheduler
 
 
@@ -85,7 +82,7 @@ class DummyJournalStore:
 
 class DummyLLM:
     async def generate(self, prompt):
-        print(f"  [LLM] Generating response...")
+        print("  [LLM] Generating response...")
         await asyncio.sleep(0.1)
         return f"[Mock LLM response to: {prompt[:80]}...]"
 
@@ -154,7 +151,7 @@ async def test_soul_engine():
         ),
     )
 
-    engine = SoulEngine(core_memory_cache=cache, vector_retriever=None)
+    engine = SoulEngine(core_memory_cache=cache, vector_retriever=None, llm=DummyLLM())
 
     prompt = await engine.build_prompt(
         user_id="test_user", session_id="session123", user_message="Hello, how are you?"
@@ -291,11 +288,11 @@ async def test_task_system():
 
     task_system = TaskSystem(task_store=task_store, blackboard=blackboard)
 
-    t1 = await task_system.create_task({"intent": "Low priority", "priority": 2})
-    t2 = await task_system.create_task({"intent": "High priority", "priority": 0})
-    t3 = await task_system.create_task({"intent": "Normal priority", "priority": 1})
+    await task_system.create_task({"intent": "Low priority", "priority": 2})
+    await task_system.create_task({"intent": "High priority", "priority": 0})
+    await task_system.create_task({"intent": "Normal priority", "priority": 1})
 
-    print(f"  Created 3 tasks with priorities 2, 0, 1")
+    print("  Created 3 tasks with priorities 2, 0, 1")
     print(f"  Pending count: {task_system.queue.get_pending_count()}")
 
     dequeued = await task_system.queue.dequeue()
@@ -390,6 +387,253 @@ async def test_integration_flow():
     return True
 
 
+async def test_chat_flow():
+    print("\n=== Test 11: Full Chat Flow (SoulEngine + ActionRouter + Evolution) ===")
+
+    cache = CoreMemoryCache()
+    cache.set(
+        "alice",
+        CoreMemory(
+            personality=PersonalityState(
+                behavioral_rules=[
+                    BehavioralRule(content="回复要简洁", source="test", confidence=0.9),
+                ],
+            )
+        ),
+    )
+
+    journal = EvolutionJournal(journal_store=DummyJournalStore(), llm_lite=DummyLLM())
+    extractor = SignalExtractor()
+    evolver = PersonalityEvolver(
+        core_memory_cache=cache,
+        llm_lite=DummyLLM(),
+        evolution_journal=journal,
+    )
+
+    event_bus = EventBus(EVENT_BUS_CONFIG)
+    await event_bus.start()
+
+    class DummyTaskSystem:
+        async def create(self, task_spec):
+            print(f"  [TaskSystem] Task created: {task_spec.get('intent', 'unknown')}")
+            return Task(intent=task_spec.get("intent", ""), created_by="test")
+
+        async def get(self, task_id):
+            return None
+
+    class DummyBlackboard:
+        async def evaluate_agents(self, task):
+            return None, 0.8
+
+        async def assign(self, task, agent):
+            print(f"  [Blackboard] Task assigned: {task.id}")
+
+        async def resume(self, task_id, hitl_result):
+            pass
+
+    task_system = DummyTaskSystem()
+    blackboard = DummyBlackboard()
+
+    from core.action_router import ActionRouter, HITLGatewayDummy, ToolExecutorDummy
+
+    router = ActionRouter(
+        task_system=task_system,
+        blackboard=blackboard,
+        hitl_gateway=HITLGatewayDummy(),
+        tool_executor=ToolExecutorDummy(),
+        event_bus=event_bus,
+    )
+
+    soul_engine = SoulEngine(
+        core_memory_cache=cache,
+        vector_retriever=None,
+        llm=DummyLLM(),
+    )
+
+    async def handle_dialogue_ended(event):
+        dialogue = event.payload.get("dialogue", [])
+        session_id = event.payload.get("session_id", "")
+        user_id = event.payload.get("user_id", "")
+        signals = await extractor.extract(dialogue, session_id, turn_index=0)
+        for signal in signals:
+            await evolver.fast_adapt(signal, user_id)
+        print(f"  [Evolution] Processed {len(signals)} signals from dialogue_ended")
+
+    await event_bus.subscribe("dialogue_ended", handle_dialogue_ended)
+
+    print("  Step 1: Build prompt")
+    prompt = await soul_engine.build_prompt(
+        "alice", "session789", "你好，请用简洁的语言介绍自己"
+    )
+    print(f"  Prompt length: {len(prompt)} chars")
+    assert len(prompt) > 100
+
+    print("  Step 2: SoulEngine.think")
+    think_result = await soul_engine.think(prompt)
+    print(
+        f"  Think result: action={think_result.get('action')}, content={think_result.get('content', '')[:50]}"
+    )
+    assert "action" in think_result
+    assert "content" in think_result
+
+    print("  Step 3: ActionRouter.route")
+    route_result = await router.route(
+        think_result, {"user_id": "alice", "session_id": "session789"}
+    )
+    print(
+        f"  Route result: action={route_result.get('action')}, content={route_result.get('content', '')[:50]}"
+    )
+
+    print("  Step 4: Emit dialogue_ended event")
+    await event_bus.emit(
+        "dialogue_ended",
+        {
+            "user_id": "alice",
+            "session_id": "session789",
+            "dialogue": [
+                {"role": "user", "content": "你好，请用简洁的语言介绍自己"},
+                {"role": "assistant", "content": route_result.get("content", "")},
+            ],
+        },
+    )
+    await asyncio.sleep(0.2)
+
+    final_mem = cache.get("alice")
+    print(f"  Final session_adaptations: {final_mem.personality.session_adaptations}")
+
+    await event_bus.stop()
+
+    print("  [PASS] Full chat flow works end-to-end")
+    return True
+
+
+async def test_circuit_breaker():
+    print("\n=== Test 12: CircuitBreaker ===")
+    from domain.stability import CircuitBreaker, CircuitBreakerOpen
+
+    cb = CircuitBreaker(
+        name="test_llm",
+        failure_threshold=3,
+        success_threshold=2,
+        open_timeout_seconds=1,
+    )
+
+    assert cb.state.state == "closed"
+    print("  Initial state: closed")
+
+    success_count = 0
+    for i in range(3):
+        try:
+            await cb.call(lambda: asyncio.sleep(0))
+            success_count += 1
+        except Exception:
+            pass
+    assert success_count == 3
+    print(f"  Closed: 3 successful calls, state={cb.state.state}")
+
+    cb.record_failure()
+    cb.record_failure()
+    assert cb.state.state == "closed"
+    cb.record_failure()
+    assert cb.state.state == "open"
+    print(f"  After 3 failures: state={cb.state.state} (OPEN)")
+
+    try:
+        await cb.call(lambda: asyncio.sleep(0))
+        assert False, "Should have raised CircuitBreakerOpen"
+    except CircuitBreakerOpen as e:
+        print(f"  OPEN call rejected: {e}")
+
+    import time
+
+    time.sleep(1.1)
+    assert cb.state.state == "half_open"
+    print(f"  After timeout: state={cb.state.state} (HALF_OPEN)")
+
+    cb.record_success()
+    cb.record_success()
+    assert cb.state.state == "closed"
+    print(f"  After 2 successes: state={cb.state.state} (CLOSED)")
+
+    print("  [PASS] CircuitBreaker state transitions work correctly")
+    return True
+
+
+async def test_core_memory_scheduler_compress():
+    print("\n=== Test 13: CoreMemoryScheduler._compress (LLM) ===")
+    cache = CoreMemoryCache()
+    cache.set("test_user", CoreMemory())
+
+    store = DummyCoreMemoryStore()
+
+    class LLMForTest:
+        async def generate(self, prompt):
+            assert "self_cognition" in prompt
+            return '{"summary": "压缩后的摘要：能力提升，掌握了新技术", "count": 5}'
+
+    scheduler = CoreMemoryScheduler(
+        core_memory_store=store,
+        cache=cache,
+        llm=LLMForTest(),
+    )
+
+    data_with_pinned = {
+        "capability_map": {
+            "code": {
+                "domain": "code",
+                "confidence": 0.9,
+                "is_pinned": True,
+                "known_limits": [],
+            },
+            "writing": {
+                "domain": "writing",
+                "confidence": 0.5,
+                "is_pinned": False,
+                "known_limits": [],
+            },
+        },
+        "known_limits": [],
+        "blindspots": [],
+    }
+    serialized = json.dumps(data_with_pinned)
+
+    compressed = await scheduler._compress(serialized, "self_cognition")
+    result = json.loads(compressed)
+
+    assert "capability_map" in result
+    assert result["capability_map"]["code"]["is_pinned"] is True
+    assert "_compressed_summary" in result
+    assert "summary" in result["_compressed_summary"]
+    print(f"  Mixed pinned+non-pinned: pinned preserved, non-pinned compressed")
+    print(f"  Compressed summary: {result['_compressed_summary']['summary']}")
+
+    data_all_pinned = {
+        "rules": [
+            {"content": "保持简洁", "is_pinned": True},
+            {"content": "技术优先", "is_pinned": True},
+        ]
+    }
+    compressed_all = await scheduler._compress(
+        json.dumps(data_all_pinned), "personality"
+    )
+    assert compressed_all == json.dumps(data_all_pinned)
+    print("  All pinned: returned unchanged")
+
+    scheduler_no_llm = CoreMemoryScheduler(
+        core_memory_store=store,
+        cache=cache,
+        llm=None,
+    )
+    result_no_llm = await scheduler_no_llm._compress(
+        json.dumps({"foo": "bar"}), "self_cognition"
+    )
+    assert result_no_llm == json.dumps({"foo": "bar"})
+    print("  No LLM configured: returned unchanged")
+
+    print("  [PASS] CoreMemoryScheduler._compress works correctly")
+    return True
+
+
 async def main():
     print("=" * 60)
     print("Mirror Agent - Full System Test")
@@ -406,6 +650,9 @@ async def main():
         test_cognition_updater,
         test_core_memory_scheduler,
         test_integration_flow,
+        test_chat_flow,
+        test_circuit_breaker,
+        test_core_memory_scheduler_compress,
     ]
 
     passed = 0

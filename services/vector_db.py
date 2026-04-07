@@ -1,5 +1,10 @@
 from typing import Optional
+
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.http import models
+
 from domain.evolution import VectorEntry
+from interfaces.storage import VectorDBInterface
 
 
 VECTOR_DB_CONFIG = {
@@ -18,12 +23,84 @@ VECTOR_NAMESPACES = {
 }
 
 
-class VectorDBClient:
-    """
-    Vector DB 基础设施防腐层 (ACL)。
-    实现命名空间路由和 is_pinned 免疫的淘汰策略。
-    """
+class QdrantVectorDB(VectorDBInterface):
+    def __init__(
+        self,
+        url: str,
+        api_key: Optional[str] = None,
+        collection_name: str = "mirror_vectors",
+    ):
+        self._client = AsyncQdrantClient(url=url, api_key=api_key)
+        self._collection = collection_name
 
+    async def insert(self, entry: VectorEntry) -> None:
+        if entry.embedding is None:
+            print(f"[QdrantVectorDB] Cannot insert entry {entry.id}: no embedding")
+            return
+
+        payload = entry.model_dump()
+        payload.pop("embedding", None)
+
+        await self._client.upsert(
+            collection_name=self._collection,
+            points=[
+                {
+                    "id": entry.id,
+                    "vector": entry.embedding,
+                    "payload": payload,
+                }
+            ],
+        )
+
+    async def search(
+        self,
+        query_embedding: list[float],
+        namespace: str,
+        top_k: int = 8,
+    ) -> list[VectorEntry]:
+        results = await self._client.search(
+            collection_name=self._collection,
+            query_vector=query_embedding,
+            limit=top_k,
+            query_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="namespace",
+                        match=models.MatchValue(value=namespace),
+                    )
+                ]
+            ),
+        )
+        entries = []
+        for result in results:
+            payload = result.payload
+            payload["embedding"] = result.vector
+            try:
+                entries.append(VectorEntry.model_validate(payload))
+            except Exception as e:
+                print(f"[QdrantVectorDB] Failed to deserialize entry: {e}")
+        return entries
+
+    async def delete(self, entry_id: str, namespace: str) -> None:
+        await self._client.delete(
+            collection_name=self._collection,
+            points_selector=models.PointIdsList(points=[entry_id]),
+        )
+
+    async def update_pinned_status(
+        self,
+        entry_id: str,
+        namespace: str,
+        is_pinned: bool,
+    ) -> None:
+        self._client.set_payload(
+            collection_name=self._collection,
+            payload={"is_pinned": is_pinned},
+            points=[entry_id],
+        )
+
+
+class VectorDBClient:
     def __init__(self, db_impl: Optional["VectorDBInterface"] = None):
         from interfaces.storage import VectorDBInterface
 
@@ -35,9 +112,6 @@ class VectorDBClient:
         entry: VectorEntry,
         namespace: Optional[str] = None,
     ) -> None:
-        """
-        插入向量条目，自动路由到指定命名空间。
-        """
         ns = namespace or entry.namespace
         await self._enforce_namespace_limit(ns)
         await self._impl.insert(entry)
@@ -48,9 +122,6 @@ class VectorDBClient:
         namespace: str,
         top_k: int = 8,
     ) -> list[VectorEntry]:
-        """
-        搜索向量，限制在指定命名空间。
-        """
         return await self._impl.search(
             query_embedding=query_embedding,
             namespace=namespace,
@@ -66,9 +137,6 @@ class VectorDBClient:
         namespace: str,
         is_pinned: bool,
     ) -> None:
-        """
-        更新 pinned 状态（pinned 条目免疫淘汰）。
-        """
         await self._impl.update_pinned_status(entry_id, namespace, is_pinned)
 
     async def get_by_namespace(
@@ -76,15 +144,9 @@ class VectorDBClient:
         namespace: str,
         limit: int = 100,
     ) -> list[VectorEntry]:
-        """
-        获取指定命名空间的所有条目（占位）。
-        """
         return []
 
     async def _enforce_namespace_limit(self, namespace: str) -> None:
-        """
-        执行命名空间容量限制，淘汰最不重要的非 pinned 条目。
-        """
         current_count = await self._get_namespace_count(namespace)
         max_count = self._config["max_entries_per_namespace"]
 
@@ -100,26 +162,17 @@ class VectorDBClient:
                 )
 
     async def _get_namespace_count(self, namespace: str) -> int:
-        """
-        获取命名空间条目数量（占位）。
-        """
         return 0
 
     async def _select_eviction_candidates(
         self, namespace: str, count: int
     ) -> list[VectorEntry]:
-        """
-        选择要淘汰的条目（排除 pinned）。
-        按 least_important 策略选择（简化实现：随机选）。
-        """
         all_entries = await self.get_by_namespace(namespace, limit=1000)
         unpinned = [e for e in all_entries if not e.is_pinned]
         return unpinned[:count]
 
 
 class VectorDBClientDummy:
-    """VectorDB 占位实现"""
-
     async def insert(self, entry: VectorEntry) -> None:
         print(f"[VectorDB] insert: {entry.namespace} - {entry.content[:50]}...")
 

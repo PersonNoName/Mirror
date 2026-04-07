@@ -1,21 +1,27 @@
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
 from domain.memory import PersonalityState, BehavioralRule
-from domain.evolution import InteractionSignal, EvolutionEntry
+from domain.evolution import InteractionSignal
+
+if TYPE_CHECKING:
+    from core.memory_cache import CoreMemoryCache
+    from services.llm import LLMInterface
+    from evolution.evolution_journal import EvolutionJournal
+    from interfaces.storage import GraphDBInterface
+    from core.core_memory_scheduler import CoreMemoryScheduler
 
 
 class LLMInterfaceDummy:
-    """LLM 调用占位实现"""
-
     async def generate(self, prompt: str) -> str:
         print(f"[LLM] 生成调用（占位）: {prompt[:100]}...")
         return "基于更新后的 traits 生成的基调描述"
 
 
 class EvolutionJournalDummy:
-    """EvolutionJournal 占位实现"""
-
-    async def record(self, entry: EvolutionEntry) -> None:
-        print(f"[EvolutionJournal] 记录: {entry.type} - {entry.summary}")
+    async def record(self, entry: dict) -> None:
+        print(
+            f"[EvolutionJournal] 记录: {entry.get('type', 'unknown')} - {entry.get('summary', '')[:50]}"
+        )
 
 
 class PersonalityEvolver:
@@ -44,25 +50,24 @@ class PersonalityEvolver:
     def __init__(
         self,
         core_memory_cache: "CoreMemoryCache",
-        llm_lite: Optional[LLMInterfaceDummy] = None,
-        evolution_journal: Optional[EvolutionJournalDummy] = None,
+        llm_lite: "LLMInterface",
+        evolution_journal: "EvolutionJournal",
+        graph_db: Optional["GraphDBInterface"] = None,
+        core_memory_scheduler: Optional["CoreMemoryScheduler"] = None,
     ):
-        from core.memory_cache import CoreMemoryCache
-
-        self.core_memory_cache: CoreMemoryCache = core_memory_cache
-        self.llm_lite = llm_lite or LLMInterfaceDummy()
-        self.evolution_journal = evolution_journal or EvolutionJournalDummy()
+        self.core_memory_cache: "CoreMemoryCache" = core_memory_cache
+        self._llm = llm_lite
+        self._journal = evolution_journal
+        self._graph_db: Optional["GraphDBInterface"] = graph_db
+        self._scheduler: Optional["CoreMemoryScheduler"] = core_memory_scheduler
         self._signal_buffer: dict[str, list[InteractionSignal]] = {}
+        self._slow_evolve_count: int = 0
 
     async def fast_adapt(
         self,
         signal: InteractionSignal,
         user_id: str,
     ) -> Optional[str]:
-        """
-        快适应：Session 内即时响应用户偏好信号。
-        不写入 Core Memory，但记录到信号缓冲区供慢进化统计。
-        """
         adaptation = await self._detect_fast_signal(signal)
         if not adaptation:
             return None
@@ -74,10 +79,9 @@ class PersonalityEvolver:
             current.session_adaptations.pop(0)
 
         current.session_adaptations.append(adaptation)
-
         self._buffer_signal(adaptation, signal)
 
-        await self.evolution_journal.record(
+        await self._journal.record(
             {
                 "type": "fast_adaptation",
                 "summary": f"本次对话适应：{adaptation}",
@@ -94,12 +98,6 @@ class PersonalityEvolver:
         signals: list[InteractionSignal],
         user_id: str,
     ) -> None:
-        """
-        慢进化：跨 Session 累积，执行三个操作：
-        1. 晋升：高频快适应规则 → 持久行为规则
-        2. 淘汰：低置信度规则清理
-        3. traits 微调 + 基调重生成
-        """
         core_mem = self.core_memory_cache.get(user_id)
         current = core_mem.personality
         changed = False
@@ -115,7 +113,7 @@ class PersonalityEvolver:
                 if not self._is_duplicate_rule(current.behavioral_rules, new_rule):
                     current.behavioral_rules.append(new_rule)
                     changed = True
-                    await self.evolution_journal.record(
+                    await self._journal.record(
                         {
                             "type": "rule_promoted",
                             "summary": f"新行为规则确认：{new_rule.content}",
@@ -134,7 +132,7 @@ class PersonalityEvolver:
         ]
         if len(current.behavioral_rules) < before_count:
             decayed_count = before_count - len(current.behavioral_rules)
-            await self.evolution_journal.record(
+            await self._journal.record(
                 {
                     "type": "rule_decayed",
                     "summary": f"淘汰了 {decayed_count} 条低置信度规则",
@@ -170,7 +168,7 @@ class PersonalityEvolver:
 
             if self._detect_drift(current):
                 await self._rollback(current)
-                await self.evolution_journal.record(
+                await self._journal.record(
                     {
                         "type": "baseline_shifted",
                         "summary": "人格漂移检测，回滚到上一版本",
@@ -183,7 +181,7 @@ class PersonalityEvolver:
                 current.traits_internal
             )
             changed = True
-            await self.evolution_journal.record(
+            await self._journal.record(
                 {
                     "type": "baseline_shifted",
                     "summary": f"人格基调更新：{current.baseline_description}",
@@ -197,6 +195,46 @@ class PersonalityEvolver:
         if changed:
             current.version += 1
             self.core_memory_cache.set(user_id, core_mem)
+
+        self._slow_evolve_count += 1
+        await self._rebuild_world_model_if_needed(user_id)
+
+    async def _rebuild_world_model_if_needed(self, user_id: str) -> None:
+        WORLD_MODEL_REBUILD_INTERVAL = 3
+
+        if not self._graph_db or not self._scheduler:
+            return
+
+        if self._slow_evolve_count % WORLD_MODEL_REBUILD_INTERVAL != 0:
+            return
+
+        print(
+            f"[PersonalityEvolver] 触发世界观重建（第 {self._slow_evolve_count} 次 slow_evolve）"
+        )
+
+        new_world_model = await self._scheduler._build_world_model_snapshot(
+            self._graph_db, user_id
+        )
+        core_mem = self.core_memory_cache.get(user_id)
+        core_mem.world_model = new_world_model
+        self.core_memory_cache.set(user_id, core_mem)
+
+        await self._scheduler.save_snapshot(
+            block_type="world_model",
+            content=new_world_model,
+            reason=f"slow_evolve #{self._slow_evolve_count}",
+        )
+        await self._journal.record(
+            {
+                "type": "world_model_rebuilt",
+                "summary": "世界观区块从 GraphDB 重建",
+                "detail": {
+                    "slow_evolve_count": self._slow_evolve_count,
+                    "user_model_keys": list(new_world_model.user_model.keys()),
+                    "agent_profiles_keys": list(new_world_model.agent_profiles.keys()),
+                },
+            }
+        )
 
     async def _detect_fast_signal(self, signal: InteractionSignal) -> Optional[str]:
         if signal.type == "explicit_instruction":
@@ -254,7 +292,7 @@ class PersonalityEvolver:
 
 请生成一条简洁的行为规则（不超过20字），描述 AI 应如何调整回复风格。
 仅输出规则文本，不要解释。"""
-        return await self.llm_lite.generate(prompt)
+        return await self._llm.generate(prompt)
 
     def _is_duplicate_rule(
         self,
@@ -318,4 +356,4 @@ class PersonalityEvolver:
         prompt = f"""根据以下人格特质数值，生成一句简洁的人格基调描述（不超过30字）：
 {traits}
 示例：直接、技术导向、尊重用户自主性的合作者"""
-        return await self.llm_lite.generate(prompt)
+        return await self._llm.generate(prompt)
