@@ -1,14 +1,17 @@
-from typing import Optional, Any
+from typing import TYPE_CHECKING, Optional, Any
 from domain.memory import (
     CoreMemory,
-    SelfCognition,
     WorldModel,
-    PersonalityState,
-    TaskExperience,
 )
 from domain.stability import SnapshotRecord
 from datetime import datetime
 import json
+
+if TYPE_CHECKING:
+    from interfaces.storage import SnapshotStoreInterface, GraphDBInterface
+    from core.memory_cache import CoreMemoryCache
+    from interfaces.storage import CoreMemoryStoreInterface
+    from services.llm import LLMInterface
 
 
 TOKEN_BUDGET_CONFIG = {
@@ -53,13 +56,14 @@ class CoreMemoryScheduler:
         core_memory_store: "CoreMemoryStoreInterface",
         cache: "CoreMemoryCache",
         logger: Optional[LoggerDummy] = None,
+        snapshot_store: Optional["SnapshotStoreInterface"] = None,
+        llm: Optional["LLMInterface"] = None,
     ):
-        from interfaces.storage import CoreMemoryStoreInterface
-        from core.memory_cache import CoreMemoryCache
-
-        self.core_memory_store: CoreMemoryStoreInterface = core_memory_store
-        self.cache: CoreMemoryCache = cache
+        self.core_memory_store: "CoreMemoryStoreInterface" = core_memory_store
+        self.cache: "CoreMemoryCache" = cache
         self.logger = logger or LoggerDummy()
+        self.snapshot_store: Optional["SnapshotStoreInterface"] = snapshot_store
+        self._llm: Optional["LLMInterface"] = llm
         self._reserve_used: dict[str, int] = {}
 
     async def write(
@@ -160,11 +164,107 @@ class CoreMemoryScheduler:
         block: str,
     ) -> str:
         """
-        LLM 压缩旧条目（占位实现）。
-        实际应调用 LLM 对非 pinned 条目进行压缩。
+        LLM 压缩非 pinned 条目。
+        策略：保留所有 is_pinned=true 的条目，其余条目由 LLM 提炼摘要。
         """
-        self.logger.info(f"触发压缩: block={block}")
-        return serialized
+        self.logger.info(f"触发 LLM 压缩: block={block}")
+
+        if not self._llm:
+            self.logger.info("无 LLM 配置，跳过压缩")
+            return serialized
+
+        try:
+            data = json.loads(serialized)
+        except (json.JSONDecodeError, TypeError):
+            self.logger.info("非 JSON 内容，跳过压缩")
+            return serialized
+
+        pinned, non_pinned = self._extract_pinned_items(data)
+
+        if not non_pinned:
+            self.logger.info("全部为 pinned 内容，跳过压缩")
+            return serialized
+
+        if not pinned:
+            compressed = await self._llm_compress_summary(non_pinned, block)
+            return json.dumps(compressed, ensure_ascii=False, default=str)
+
+        compressed_non_pinned = await self._llm_compress_summary(non_pinned, block)
+        result = {**pinned, "_compressed_summary": compressed_non_pinned}
+        return json.dumps(result, ensure_ascii=False, default=str)
+
+    def _extract_pinned_items(self, data: Any, path: str = "") -> tuple[dict, list]:
+        """
+        递归分离 pinned 和 non-pinned 内容。
+        返回 (pinned_dict, non_pinned_list)。
+        """
+        pinned = {} if isinstance(data, dict) else []
+        non_pinned = []
+
+        if isinstance(data, dict):
+            for key, value in data.items():
+                current_path = f"{path}.{key}" if path else key
+                if isinstance(value, dict):
+                    if value.get("is_pinned") is True:
+                        pinned[key] = value
+                        continue
+                    p, n = self._extract_pinned_items(value, current_path)
+                    if p:
+                        pinned[key] = p
+                    non_pinned.extend(n)
+                elif isinstance(value, list):
+                    pinned_items_list = []
+                    for i, item in enumerate(value):
+                        if isinstance(item, dict) and item.get("is_pinned") is True:
+                            pinned_items_list.append(item)
+                        else:
+                            p, n = self._extract_pinned_items(
+                                item, f"{current_path}[{i}]"
+                            )
+                            if p:
+                                pinned_items_list.append(p)
+                            non_pinned.extend(n)
+                    if pinned_items_list:
+                        pinned[key] = pinned_items_list
+                else:
+                    non_pinned.append({key: value})
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                if isinstance(item, dict) and item.get("is_pinned") is True:
+                    pinned.append(item)
+                else:
+                    p, n = self._extract_pinned_items(item, f"{path}[{i}]")
+                    if p:
+                        pinned.append(p)
+                    non_pinned.extend(n)
+        else:
+            non_pinned.append(data)
+
+        return pinned, non_pinned
+
+    async def _llm_compress_summary(self, non_pinned: list, block: str) -> dict:
+        content_str = json.dumps(non_pinned, ensure_ascii=False, default=str, indent=2)
+
+        prompt = f"""你是一个记忆压缩助手。以下是某个 AI Agent 的{block}内容（共 {len(non_pinned)} 条非核心条目）：
+
+{content_str}
+
+请将这些内容提炼为简洁的摘要（不超过 200 字），保留核心信息。
+直接输出 JSON 对象，格式：{{"summary": "摘要文字", "count": 条目数量}}
+
+不要有任何解释或前缀。"""
+
+        response = await self._llm.generate(prompt)
+
+        try:
+            result = json.loads(response)
+            if isinstance(result, dict) and "summary" in result:
+                return result
+        except json.JSONDecodeError:
+            pass
+
+        summary_text = response.strip()
+        return {"summary": summary_text, "count": len(non_pinned)}
 
     async def _build_world_model_snapshot(
         self,
@@ -174,8 +274,6 @@ class CoreMemoryScheduler:
         """
         从 Graph DB 合成 world_model 快照。
         """
-        from interfaces.storage import GraphDBInterface
-
         user_model = await graph_db.query_user_preferences(user_id)
         agent_profiles = await graph_db.query_agent_capabilities()
         env_constraints = await graph_db.query_env_constraints()
@@ -196,8 +294,6 @@ class CoreMemoryScheduler:
         """
         保存版本快照（用于漂移回滚）。
         """
-        from interfaces.storage import SnapshotStoreInterface
-
         if hasattr(content, "model_dump"):
             data = content.model_dump()
         else:
@@ -209,4 +305,9 @@ class CoreMemoryScheduler:
             content=data,
             reason=reason,
         )
-        print(f"[CoreMemoryScheduler] 快照已保存: block={block_type}")
+
+        if self.snapshot_store:
+            await self.snapshot_store.save(snapshot)
+            print(f"[CoreMemoryScheduler] 快照已保存到存储: block={block_type}")
+        else:
+            print(f"[CoreMemoryScheduler] 快照已创建（未持久化）: block={block_type}")
