@@ -1,5 +1,5 @@
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from domain.evolution import VectorEntry
 
@@ -55,10 +55,12 @@ class ObserverEngine:
         graph_db: "GraphDBClient",
         vector_db: "VectorDBClient",
         llm_lite: "LLMInterface",
+        event_bus: Any = None,
     ):
         self._graph_db = graph_db
         self._vector_db = vector_db
         self._llm = llm_lite
+        self._event_bus = event_bus
         self._batch: list[dict] = []
 
     async def process(self, dialogue: list[dict], session_id: str) -> None:
@@ -69,11 +71,24 @@ class ObserverEngine:
         knowledge_triplets = await self._extract_knowledge(dialogue)
         if not knowledge_triplets:
             print("[Observer] 未抽取到知识三元组")
+            if self._event_bus:
+                await self._event_bus.emit(
+                    "observation_done",
+                    {"session_id": session_id, "triplet_count": 0},
+                    priority=1,
+                )
             return
 
         for triplet in knowledge_triplets:
             await self._write_to_graph(triplet)
             await self._write_to_vector(triplet, session_id)
+
+        if self._event_bus:
+            await self._event_bus.emit(
+                "observation_done",
+                {"session_id": session_id, "triplet_count": len(knowledge_triplets)},
+                priority=1,
+            )
 
     async def _is_salient(self, dialogue: list[dict]) -> bool:
         return len(dialogue) > 3

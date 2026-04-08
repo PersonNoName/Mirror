@@ -1,9 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Coroutine
-from domain.task import Task, TaskResult
+from typing import Any, Optional
+from domain.task import Task
 from domain.memory import CoreMemory
-from domain.evolution import Event, EvolutionEntry, VectorEntry
-from domain.stability import CircuitBreakerState, SnapshotRecord
+from domain.evolution import EvolutionEntry, VectorEntry
+from domain.stability import SnapshotRecord
 
 
 class GraphDBInterface(ABC):

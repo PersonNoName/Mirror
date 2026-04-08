@@ -8,7 +8,6 @@ from evolution.cognition_updater import (
 from evolution.evolution_journal import (
     EvolutionJournal,
     JournalStoreDummy,
-    LLMInterfaceDummy as JournalLLMDummy,
 )
 from evolution.meta_cognition import MetaCognitionReflector
 from evolution.observer import ObserverEngine, VectorDBInterfaceDummy

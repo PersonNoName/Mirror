@@ -1,5 +1,5 @@
 import json
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Any
 
 from domain.evolution import Lesson
 from domain.task import Task
@@ -40,8 +40,9 @@ class MetaCognitionReflector:
     订阅 task_completed (P1) 和 task_failed (P0，立即触发)。
     """
 
-    def __init__(self, llm_lite: "LLMInterface"):
+    def __init__(self, llm_lite: "LLMInterface", event_bus: Any = None):
         self._llm = llm_lite
+        self._event_bus = event_bus
 
     async def reflect(self, task: Task) -> Optional[Lesson]:
         prompt = REFLECTION_PROMPT_TEMPLATE.format(
@@ -89,4 +90,17 @@ class MetaCognitionReflector:
             f"[MetaCognitionReflector] Generated lesson: domain={lesson.domain}, "
             f"confidence={confidence:.2f}, is_pattern={lesson.is_pattern}"
         )
+
+        if self._event_bus:
+            await self._event_bus.emit(
+                "lesson_generated",
+                {
+                    "lesson": lesson.model_dump(),
+                    "task_id": task.id,
+                    "domain": lesson.domain,
+                    "is_pattern": lesson.is_pattern,
+                },
+                priority=0,
+            )
+
         return lesson

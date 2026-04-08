@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, Callable, Awaitable
+from typing import Callable, Awaitable
 from dataclasses import dataclass
 from domain.evolution import Event
 
