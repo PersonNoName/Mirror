@@ -21,3 +21,15 @@ class InMemoryEventBus(EventBus):
 
     async def subscribe(self, event_type: str, handler: Any) -> None:
         self._handlers[event_type].append(handler)
+
+    async def ack(self, stream_name: str, delivery_id: str) -> None:
+        return None
+
+    async def retry(self, event: Event) -> None:
+        await self.emit(event)
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None

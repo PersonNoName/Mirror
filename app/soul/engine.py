@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.hooks import HookRegistry, HookPoint
 from app.memory import CoreMemoryCache, SessionContextStore, VectorRetriever
 from app.platform.base import InboundMessage
 from app.providers.openai_compat import ProviderRequestError
@@ -64,20 +65,26 @@ class SoulEngine:
         session_context_store: SessionContextStore | None,
         vector_retriever: VectorRetriever | None,
         tool_registry: Any,
+        hook_registry: HookRegistry | None = None,
     ) -> None:
         self.model_registry = model_registry
         self.core_memory_cache = core_memory_cache
         self.session_context_store = session_context_store
         self.vector_retriever = vector_retriever
         self.tool_registry = tool_registry
+        self.hook_registry = hook_registry
 
     async def run(self, message: InboundMessage) -> Action:
         """Reason about an inbound message and produce a structured action."""
 
+        if self.hook_registry is not None:
+            await self.hook_registry.trigger(HookPoint.PRE_REASON, message=message)
+
         core_memory = await self.core_memory_cache.get(message.user_id)
         recent_messages = await self._get_recent_messages(message)
+        session_adaptations = await self._get_session_adaptations(message)
         retrieved = await self._retrieve_context(message)
-        prompt = self._build_prompt(core_memory, recent_messages, retrieved)
+        prompt = self._build_prompt(core_memory, recent_messages, session_adaptations, retrieved)
 
         api_key = self.model_registry.specs["reasoning.main"].api_key_ref
         if not api_key:
@@ -90,13 +97,21 @@ class SoulEngine:
         try:
             response = await self.model_registry.chat("reasoning.main").generate(messages)
         except (ProviderRequestError, KeyError, NotImplementedError, ValueError):
-            return self._fallback_action(message)
+            action = self._fallback_action(message)
+            if self.hook_registry is not None:
+                await self.hook_registry.trigger(HookPoint.POST_REASON, message=message, action=action, prompt=prompt)
+            return action
 
         raw_text = self._extract_response_text(response)
         parsed = self._parse_action(raw_text)
         if parsed is None:
-            return self._fallback_action(message, raw_response=raw_text)
+            action = self._fallback_action(message, raw_response=raw_text)
+            if self.hook_registry is not None:
+                await self.hook_registry.trigger(HookPoint.POST_REASON, message=message, action=action, prompt=prompt)
+            return action
         parsed.raw_response = raw_text
+        if self.hook_registry is not None:
+            await self.hook_registry.trigger(HookPoint.POST_REASON, message=message, action=parsed, prompt=prompt)
         return parsed
 
     async def _get_recent_messages(self, message: InboundMessage) -> list[dict[str, Any]]:
@@ -122,18 +137,34 @@ class SoulEngine:
         except Exception:
             return {"matches": []}
 
+    async def _get_session_adaptations(self, message: InboundMessage) -> list[str]:
+        if self.session_context_store is None:
+            return []
+        try:
+            return await self.session_context_store.get_adaptations(message.user_id, message.session_id)
+        except Exception:
+            return []
+
     def _build_prompt(
         self,
         core_memory: Any,
         recent_messages: list[dict[str, Any]],
+        session_adaptations_live: list[str],
         retrieved: dict[str, Any],
     ) -> str:
-        tool_list = ", ".join(self.tool_registry.list_tools()) or "当前无可用工具"
+        tool_descriptions = self.tool_registry.describe_tools()
+        tool_list = "\n".join(
+            f"- {item['name']}: {item['description'] or '无描述'} | schema={item['schema']}"
+            for item in tool_descriptions
+        ) or "- 当前无可用工具"
         behavioral_rules = "\n".join(
             f"- {rule.rule}" for rule in core_memory.personality.behavioral_rules
         ) or "- 暂无持久行为规则"
+        merged_adaptations = list(core_memory.personality.session_adaptations) + [
+            item for item in session_adaptations_live if item not in core_memory.personality.session_adaptations
+        ]
         session_adaptations = "\n".join(
-            f"- {item}" for item in core_memory.personality.session_adaptations
+            f"- {item}" for item in merged_adaptations
         ) or "- 暂无当前会话适应"
         recent_dialogue = "\n".join(
             f"{item.get('role', 'unknown')}: {item.get('content', '')}" for item in recent_messages[-5:]

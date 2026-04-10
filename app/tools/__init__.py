@@ -1,5 +1,6 @@
 """Tool registry package."""
 
-from app.tools.registry import ToolRegistry, tool_registry
+from app.tools.mcp_adapter import MCPToolAdapter
+from app.tools.registry import ToolDefinition, ToolInvocationError, ToolRegistry, tool_registry
 
-__all__ = ["ToolRegistry", "tool_registry"]
+__all__ = ["MCPToolAdapter", "ToolDefinition", "ToolInvocationError", "ToolRegistry", "tool_registry"]

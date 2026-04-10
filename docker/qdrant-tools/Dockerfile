@@ -1,5 +1,5 @@
-FROM busybox:1.36.1 AS busybox
+FROM busybox:latest AS busybox
 
-FROM qdrant/qdrant:v1.10.1
+FROM qdrant/qdrant:latest
 
 COPY --from=busybox /bin/busybox /bin/busybox

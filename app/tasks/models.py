@@ -44,8 +44,17 @@ class Lesson:
 
     id: str = field(default_factory=lambda: str(uuid4()))
     source_task_id: str | None = None
+    user_id: str = ""
+    domain: str = "general"
+    outcome: str = ""
     category: str = "general"
     summary: str = ""
+    root_cause: str = ""
+    lesson_text: str = ""
+    is_agent_capability_issue: bool = False
+    subject: str | None = None
+    relation: str | None = None
+    object: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     confidence: float = 0.0
     created_at: datetime = field(default_factory=utc_now)

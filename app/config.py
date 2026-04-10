@@ -137,6 +137,10 @@ class Settings(BaseSettings):
     MODEL_RETRIEVAL_RERANKER_BASE_URL: str = "http://127.0.0.1:8081"
     MODEL_RETRIEVAL_RERANKER_API_KEY: str = ""
 
+    SKILLS_DIR: str = "skills"
+    MCP_SERVERS_FILE: str = "mcp_servers.json"
+    MCP_SERVERS_JSON: str = ""
+
     @property
     def app(self) -> AppConfig:
         return AppConfig(

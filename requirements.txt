@@ -8,3 +8,4 @@ asyncpg>=0.29,<1.0
 neo4j>=5.20,<6.0
 pydantic-settings>=2.3,<3.0
 structlog>=24.1,<25.0
+PyYAML>=6.0,<7.0

@@ -1,0 +1,11 @@
+{
+  "type": "tool",
+  "name": "get_current_time_skill",
+  "description": "Return the current UTC time through the skill loader path.",
+  "schema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "target": "skills.sample_tools:get_current_time_tool"
+}

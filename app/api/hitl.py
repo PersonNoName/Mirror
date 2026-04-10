@@ -30,4 +30,14 @@ async def hitl_respond(request: Request, payload: HitlResponseRequest) -> dict[s
         payload.decision,
         payload.payload,
     )
+    await request.app.state.event_bus.emit(
+        request.app.state.event_bus_event_factory(
+            "hitl_feedback",
+            {
+                "task_id": payload.task_id,
+                "decision": payload.decision,
+                "payload": payload.payload,
+            },
+        )
+    )
     return {"status": "ok", "task_id": payload.task_id, "decision": payload.decision}

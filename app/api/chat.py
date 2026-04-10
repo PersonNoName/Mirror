@@ -30,6 +30,7 @@ async def chat(request: Request, payload: ChatRequest) -> dict[str, Any]:
             "capabilities": ["streaming"],
         }
     )
+    app_state.core_memory_cache.mark_session_active(inbound.user_id, inbound.session_id)
     await app_state.session_context_store.append_message(
         inbound.user_id,
         inbound.session_id,

@@ -39,6 +39,9 @@ class Blackboard:
             "task_id": request.task_id,
             "title": request.title,
             "description": request.description,
+            "options": list(getattr(request, "options", ["approve", "reject"])),
+            "risk_level": getattr(request, "risk_level", "medium"),
+            "metadata": dict(getattr(request, "metadata", {})),
         }
         await self.task_store.update(task)
         await self.event_bus.emit(
