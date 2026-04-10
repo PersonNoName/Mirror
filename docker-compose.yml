@@ -1,0 +1,108 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mirror-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mirror}
+      POSTGRES_USER: ${POSTGRES_USER:-mirror}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mirror}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mirror} -d ${POSTGRES_DB:-mirror}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: mirror-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  neo4j:
+    image: neo4j:5.22-community
+    container_name: mirror-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: "${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-mirrorneo4j}"
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data_phase0:/data
+      - neo4j_logs_phase0:/logs
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "cypher-shell -a bolt://127.0.0.1:7687 -u ${NEO4J_USER:-neo4j} -p ${NEO4J_PASSWORD:-mirrorneo4j} \"RETURN 1;\" >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  qdrant:
+    build:
+      context: .
+      dockerfile: docker/qdrant-tools/Dockerfile
+    container_name: mirror-qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data_phase0:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "/qdrant/qdrant", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  opencode:
+    build:
+      context: .
+      dockerfile: docker/opencode-stub/Dockerfile
+    container_name: mirror-opencode
+    restart: unless-stopped
+    ports:
+      - "${OPENCODE_PORT:-4096}:4096"
+    volumes:
+      - opencode_data:/var/lib/opencode
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4096/health', timeout=3).read()",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  postgres_data:
+  redis_data:
+  neo4j_data_phase0:
+  neo4j_logs_phase0:
+  qdrant_data_phase0:
+  opencode_data:
