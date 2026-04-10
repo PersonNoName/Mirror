@@ -1,1 +1,6 @@
 """API layer package."""
+
+from app.api.chat import router as chat_router
+from app.api.hitl import router as hitl_router
+
+__all__ = ["chat_router", "hitl_router"]
