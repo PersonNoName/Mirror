@@ -108,6 +108,32 @@ async def test_signal_extractor_emits_proactivity_preference_lesson_for_explicit
     assert proactivity["details"]["explicit_user_statement"] is True
 
 
+@pytest.mark.asyncio
+async def test_signal_extractor_emits_explicit_preference_lesson_for_python_like_statement() -> None:
+    personality_evolver = RecordingPersonalityEvolver()
+    event_bus = RecordingEventBus()
+    extractor = SignalExtractor(personality_evolver=personality_evolver, event_bus=event_bus)
+
+    await extractor.handle_dialogue_ended(
+        Event(
+            type="dialogue_ended",
+            payload={
+                "user_id": "user-1",
+                "session_id": "session-2",
+                "text": "我很喜欢python",
+                "reply": "收到",
+            },
+        )
+    )
+
+    lessons = [event.payload["lesson"] for event in event_bus.events]
+    explicit = next(item for item in lessons if item["domain"] == "explicit_preference")
+    assert explicit["summary"] == "User likes Python."
+    assert explicit["details"]["preference_relation"] == "likes"
+    assert explicit["details"]["preference_object"] == "Python"
+    assert explicit["details"]["explicit_user_statement"] is True
+
+
 def test_support_policy_uses_stored_problem_solving_preference_when_current_turn_is_ambiguous() -> None:
     core_memory = CoreMemory()
     core_memory.world_model.confirmed_facts.append(

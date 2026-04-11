@@ -137,14 +137,18 @@ class RedisStreamsEventBus(EventBus):
         self.idempotency_store = idempotency_store
         self.consumer_name = consumer_name
         self.max_queue_depth = max_queue_depth
-        self._handlers: dict[str, list[Callable[[Event], Awaitable[None]]]] = defaultdict(list)
+        self._handlers: dict[str, list[Callable[[Event], Awaitable[None]]]] = (
+            defaultdict(list)
+        )
         self._tasks: list[asyncio.Task[None]] = []
         self.degraded = redis_client is None
 
     async def emit(self, event: Event) -> None:
         event.stream_name = self.stream_for_type(event.type)
         await self.outbox_store.enqueue(
-            self.outbox_store.from_payload(event.stream_name, {"event": self._serialize_event(event)})
+            self.outbox_store.from_payload(
+                event.stream_name, {"event": self._serialize_event(event)}
+            )
         )
 
     async def subscribe(self, event_type: str, handler: Any) -> None:
@@ -153,7 +157,11 @@ class RedisStreamsEventBus(EventBus):
     async def ack(self, stream_name: str, delivery_id: str) -> None:
         if self.degraded or not delivery_id:
             return
-        await self.redis_client.xack(stream_name, self.group_for_type(self._event_type_for_stream(stream_name)), delivery_id)
+        await self.redis_client.xack(
+            stream_name,
+            self.group_for_type(self._event_type_for_stream(stream_name)),
+            delivery_id,
+        )
 
     async def retry(self, event: Event) -> None:
         await self.emit(event)
@@ -162,16 +170,22 @@ class RedisStreamsEventBus(EventBus):
         if self.degraded:
             logger.warning("event_bus_degraded", reason="redis_unavailable")
             return
-        event_types = [event_type for event_type, handlers in self._handlers.items() if handlers]
+        event_types = [
+            event_type for event_type, handlers in self._handlers.items() if handlers
+        ]
         for event_type in event_types:
             stream_name = self.stream_for_type(event_type)
             group_name = self.group_for_type(event_type)
             try:
-                await self.redis_client.xgroup_create(stream_name, group_name, id="0", mkstream=True)
+                await self.redis_client.xgroup_create(
+                    stream_name, group_name, id="0", mkstream=True
+                )
             except Exception as exc:
                 if "BUSYGROUP" not in str(exc):
                     raise
-            self._tasks.append(asyncio.create_task(self._consume(event_type, stream_name, group_name)))
+            self._tasks.append(
+                asyncio.create_task(self._consume(event_type, stream_name, group_name))
+            )
 
     async def stop(self) -> None:
         for task in self._tasks:
@@ -183,7 +197,9 @@ class RedisStreamsEventBus(EventBus):
                 pass
         self._tasks.clear()
 
-    async def _consume(self, event_type: str, stream_name: str, group_name: str) -> None:
+    async def _consume(
+        self, event_type: str, stream_name: str, group_name: str
+    ) -> None:
         while True:
             await self._recover_pending(event_type, stream_name, group_name)
             entries = await self.redis_client.xreadgroup(
@@ -195,9 +211,13 @@ class RedisStreamsEventBus(EventBus):
             )
             for _, messages in entries:
                 for delivery_id, fields in messages:
-                    await self._handle_message(event_type, stream_name, group_name, delivery_id, fields)
+                    await self._handle_message(
+                        event_type, stream_name, group_name, delivery_id, fields
+                    )
 
-    async def _recover_pending(self, event_type: str, stream_name: str, group_name: str) -> None:
+    async def _recover_pending(
+        self, event_type: str, stream_name: str, group_name: str
+    ) -> None:
         try:
             _, claimed, _ = await self.redis_client.xautoclaim(
                 name=stream_name,
@@ -210,7 +230,9 @@ class RedisStreamsEventBus(EventBus):
         except Exception:
             return
         for delivery_id, fields in claimed:
-            await self._handle_message(event_type, stream_name, group_name, delivery_id, fields)
+            await self._handle_message(
+                event_type, stream_name, group_name, delivery_id, fields
+            )
 
     async def _handle_message(
         self,
@@ -276,7 +298,12 @@ class RedisStreamsEventBus(EventBus):
 
     @staticmethod
     def stream_for_type(event_type: str) -> str:
-        return EVENT_STREAMS.get(event_type, LOW_PRIORITY_STREAM if event_type in LOW_PRIORITY_TYPES else "stream:event:evolution")
+        return EVENT_STREAMS.get(
+            event_type,
+            LOW_PRIORITY_STREAM
+            if event_type in LOW_PRIORITY_TYPES
+            else "stream:event:evolution",
+        )
 
     @staticmethod
     def group_for_type(event_type: str) -> str:
@@ -289,16 +316,32 @@ class RedisStreamsEventBus(EventBus):
         return payload
 
     @staticmethod
-    def _deserialize_event(fields: dict[str, Any], stream_name: str, delivery_id: str) -> Event:
-        raw_payload = fields.get("payload", "{}")
+    def _deserialize_event(
+        fields: dict[str, Any], stream_name: str, delivery_id: str
+    ) -> Event:
+        def get_field(key: str) -> Any:
+            if key in fields:
+                return fields[key]
+            if isinstance(list(fields.keys())[0] if fields else None, bytes):
+                byte_key = key.encode()
+                return fields.get(byte_key)
+            return None
+
+        raw_payload = get_field("payload") or "{}"
         if isinstance(raw_payload, bytes):
             raw_payload = raw_payload.decode()
-        payload = json.loads(raw_payload)
+        payload = json.loads(raw_payload) if raw_payload else {}
         event_payload = dict(payload.get("event", {}))
+        event_type_raw = get_field("event_type")
+        event_type_str = (
+            event_type_raw.decode()
+            if isinstance(event_type_raw, bytes)
+            else (event_type_raw or "")
+        )
         created_at = event_payload.get("created_at")
         return Event(
             id=event_payload.get("id", str(uuid4())),
-            type=event_payload.get("type", fields.get("event_type", "")),
+            type=event_payload.get("type", event_type_str),
             payload=dict(event_payload.get("payload", {})),
             priority=int(event_payload.get("priority", 1)),
             stream_name=stream_name,

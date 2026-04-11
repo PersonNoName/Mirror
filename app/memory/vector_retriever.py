@@ -39,6 +39,7 @@ class VectorRetriever:
         self.qdrant_client = qdrant_client or AsyncQdrantClient(
             url=settings.qdrant.url,
             api_key=settings.qdrant.api_key or None,
+            check_compatibility=False,
         )
         self.collection_name = collection_name
         self.recall_top_k = recall_top_k
@@ -57,7 +58,9 @@ class VectorRetriever:
         confirmed_by_user: bool = False,
     ) -> str:
         self._validate_namespace(namespace)
-        vector = (await self.model_registry.embedding("retrieval.embedding").embed([content]))[0]
+        vector = (
+            await self.model_registry.embedding("retrieval.embedding").embed([content])
+        )[0]
         await self._ensure_collection(len(vector))
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         point_id = str(uuid5(NAMESPACE_URL, f"{user_id}:{namespace}:{content_hash}"))
@@ -98,7 +101,9 @@ class VectorRetriever:
         query_vector = (
             await self.model_registry.embedding("retrieval.embedding").embed([query])
         )[0]
-        query_filter = self._build_filter(user_id=user_id, namespaces=requested_namespaces)
+        query_filter = self._build_filter(
+            user_id=user_id, namespaces=requested_namespaces
+        )
         results = await self.qdrant_client.query_points(
             collection_name=self.collection_name,
             query=query_vector,
@@ -111,7 +116,10 @@ class VectorRetriever:
 
         final_limit = min(limit, self.final_top_k)
         scores = [item["score"] for item in matches]
-        if len(scores) > 1 and statistics.pvariance(scores) > self.rerank_variance_threshold:
+        if (
+            len(scores) > 1
+            and statistics.pvariance(scores) > self.rerank_variance_threshold
+        ):
             reranked = await self.model_registry.reranker("retrieval.reranker").rerank(
                 query=query,
                 docs=[item["content"] for item in matches],
@@ -193,7 +201,14 @@ class VectorRetriever:
         if not enriched:
             return matches
         reranked_items = [
-            item for _, item in sorted(enriched, key=lambda pair: pair[1].get("rerank_score", 0.0), reverse=True)
+            item
+            for _, item in sorted(
+                enriched,
+                key=lambda pair: pair[1].get("rerank_score", 0.0),
+                reverse=True,
+            )
         ]
-        remaining = [dict(match) for idx, match in enumerate(matches) if idx not in seen_indices]
+        remaining = [
+            dict(match) for idx, match in enumerate(matches) if idx not in seen_indices
+        ]
         return reranked_items + remaining

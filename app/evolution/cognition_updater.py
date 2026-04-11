@@ -7,7 +7,10 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
-from app.evolution.candidate_pipeline import EvolutionCandidate, EvolutionCandidateManager
+from app.evolution.candidate_pipeline import (
+    EvolutionCandidate,
+    EvolutionCandidateManager,
+)
 from app.memory.core_memory import (
     DurableMemory,
     FactualMemory,
@@ -16,7 +19,12 @@ from app.memory.core_memory import (
     utc_now_iso,
 )
 from app.platform.base import HitlRequest
-from app.tasks.models import EvolutionCandidateRequest, Lesson, MemoryConfirmationRequest, Task
+from app.tasks.models import (
+    EvolutionCandidateRequest,
+    Lesson,
+    MemoryConfirmationRequest,
+    Task,
+)
 
 
 class CognitionUpdater:
@@ -86,37 +94,55 @@ class CognitionUpdater:
         current = deepcopy(await self.core_memory_cache.get(user_id))
         world_model = current.world_model
         memory_key = str(confirmation.get("memory_key", ""))
-        pending = [item for item in world_model.pending_confirmations if item.memory_key != memory_key]
+        pending = [
+            item
+            for item in world_model.pending_confirmations
+            if item.memory_key != memory_key
+        ]
         candidate = self._memory_from_dict(dict(confirmation.get("candidate", {})))
         if candidate is None:
             world_model.pending_confirmations = pending
-            await self.core_memory_scheduler.write(user_id, "world_model", world_model, event_id=task.id)
+            await self.core_memory_scheduler.write(
+                user_id, "world_model", world_model, event_id=task.id
+            )
             if self.relationship_state_machine is not None:
-                await self.relationship_state_machine.evaluate(user_id=user_id, event_id=task.id)
+                await self.relationship_state_machine.evaluate(
+                    user_id=user_id, event_id=task.id
+                )
             return
 
         if decision == "approve":
             candidate.confirmed_by_user = True
             candidate.status = "active"
             if isinstance(candidate, FactualMemory):
-                world_model.confirmed_facts = self._merge_memory(world_model.confirmed_facts, candidate)
+                world_model.confirmed_facts = self._merge_memory(
+                    world_model.confirmed_facts, candidate
+                )
             elif isinstance(candidate, InferredMemory):
-                world_model.inferred_memories = self._merge_memory(world_model.inferred_memories, candidate)
+                world_model.inferred_memories = self._merge_memory(
+                    world_model.inferred_memories, candidate
+                )
             elif isinstance(candidate, RelationshipMemory):
                 await self._promote_relationship(user_id, candidate)
             task.status = "done"
         elif decision == "reject":
             candidate.status = "superseded"
-            world_model.memory_conflicts = self._merge_memory(world_model.memory_conflicts, candidate)
+            world_model.memory_conflicts = self._merge_memory(
+                world_model.memory_conflicts, candidate
+            )
             task.status = "done"
         else:
             pending.append(candidate)
             task.status = "waiting_hitl"
 
         world_model.pending_confirmations = pending
-        await self.core_memory_scheduler.write(user_id, "world_model", world_model, event_id=task.id)
+        await self.core_memory_scheduler.write(
+            user_id, "world_model", world_model, event_id=task.id
+        )
         if self.relationship_state_machine is not None:
-            await self.relationship_state_machine.evaluate(user_id=user_id, event_id=task.id)
+            await self.relationship_state_machine.evaluate(
+                user_id=user_id, event_id=task.id
+            )
         if self.task_store is not None:
             await self.task_store.update(task)
 
@@ -136,9 +162,13 @@ class CognitionUpdater:
         user_id = str(task.metadata.get("user_id", "")) or candidate.user_id
         if decision == "approve":
             if candidate.affected_area == "self_cognition":
-                await self._apply_self_cognition_candidate(user_id, candidate.proposed_change, event_id=task.id)
+                await self._apply_self_cognition_candidate(
+                    user_id, candidate.proposed_change, event_id=task.id
+                )
             elif candidate.affected_area == "world_model":
-                await self._apply_world_model_candidate(user_id, candidate.proposed_change, event_id=task.id)
+                await self._apply_world_model_candidate(
+                    user_id, candidate.proposed_change, event_id=task.id
+                )
             await self.candidate_manager.mark_applied(candidate.id)
             task.status = "done"
         elif decision == "reject":
@@ -163,18 +193,26 @@ class CognitionUpdater:
             "summary": lesson.summary,
         }
         if self.candidate_manager is None:
-            await self._apply_self_cognition_candidate(lesson.user_id, proposed_change, event_id=lesson.id)
+            await self._apply_self_cognition_candidate(
+                lesson.user_id, proposed_change, event_id=lesson.id
+            )
             return
         submission = await self.candidate_manager.submit(
             user_id=lesson.user_id,
             affected_area="self_cognition",
             dedupe_key=f"self_cognition:{lesson.domain or 'general'}",
             proposed_change=proposed_change,
-            evidence_summary=lesson.summary or lesson.root_cause or f"Capability signal for {lesson.domain or 'general'}",
+            evidence_summary=lesson.summary
+            or lesson.root_cause
+            or f"Capability signal for {lesson.domain or 'general'}",
             rationale="Capability and limitation updates now require candidate aggregation before long-term write.",
-            risk_level="medium" if lesson.outcome != "done" or bool(lesson.root_cause) else "low",
+            risk_level="medium"
+            if lesson.outcome != "done" or bool(lesson.root_cause)
+            else "low",
             source_event_id=lesson.id,
-            source_context_id=str(lesson.details.get("session_id") or lesson.source_task_id or lesson.id),
+            source_context_id=str(
+                lesson.details.get("session_id") or lesson.source_task_id or lesson.id
+            ),
             metadata={"source": "lesson"},
         )
         if submission.action == "apply":
@@ -185,7 +223,9 @@ class CognitionUpdater:
             )
             await self.candidate_manager.mark_applied(submission.candidate.id)
         elif submission.action == "hitl":
-            await self._create_evolution_candidate_task(lesson.user_id, submission.candidate)
+            await self._create_evolution_candidate_task(
+                lesson.user_id, submission.candidate
+            )
 
     async def _apply_self_cognition_candidate(
         self,
@@ -216,16 +256,24 @@ class CognitionUpdater:
         if proposed_change.get("root_cause"):
             from app.memory.core_memory import MemoryEntry
 
-            block.known_limits.append(MemoryEntry(content=str(proposed_change["root_cause"])))
+            block.known_limits.append(
+                MemoryEntry(content=str(proposed_change["root_cause"]))
+            )
         block.version += 1
-        await self.core_memory_scheduler.write(user_id, "self_cognition", block, event_id=event_id)
+        await self.core_memory_scheduler.write(
+            user_id, "self_cognition", block, event_id=event_id
+        )
 
     async def _update_world_model(self, lesson: Lesson) -> None:
         candidate = self._classify_memory(lesson)
         if self.memory_governance_service is not None:
             current = deepcopy(await self.core_memory_cache.get(lesson.user_id))
-            content_class = self.memory_governance_service.content_class_for_memory(candidate)
-            if self.memory_governance_service.is_blocked(current.world_model, content_class):
+            content_class = self.memory_governance_service.content_class_for_memory(
+                candidate
+            )
+            if self.memory_governance_service.is_blocked(
+                current.world_model, content_class
+            ):
                 if self.candidate_manager is not None:
                     await self.memory_governance_service._revert_candidates_for_class(
                         lesson.user_id,
@@ -238,15 +286,21 @@ class CognitionUpdater:
             current = deepcopy(await self.core_memory_cache.get(lesson.user_id))
             world_model = current.world_model
             candidate.status = "pending_confirmation"
-            world_model.pending_confirmations = self._merge_memory(world_model.pending_confirmations, candidate)
-            await self.core_memory_scheduler.write(lesson.user_id, "world_model", world_model, event_id=lesson.id)
+            world_model.pending_confirmations = self._merge_memory(
+                world_model.pending_confirmations, candidate
+            )
+            await self.core_memory_scheduler.write(
+                lesson.user_id, "world_model", world_model, event_id=lesson.id
+            )
             await self._create_memory_confirmation_task(lesson, candidate)
             return
 
         current = deepcopy(await self.core_memory_cache.get(lesson.user_id))
         conflict = None
         if isinstance(candidate, InferredMemory):
-            conflict = self._detect_conflict(current.world_model.confirmed_facts, candidate)
+            conflict = self._detect_conflict(
+                current.world_model.confirmed_facts, candidate
+            )
             if conflict is not None:
                 candidate.status = "conflicted"
                 candidate.conflict_with = [conflict.memory_key or conflict.content]
@@ -268,7 +322,9 @@ class CognitionUpdater:
             rationale="World-model lessons now flow through the controlled evolution candidate pipeline.",
             risk_level=self._world_model_risk(candidate, conflict),
             source_event_id=lesson.id,
-            source_context_id=str(lesson.details.get("session_id") or lesson.source_task_id or lesson.id),
+            source_context_id=str(
+                lesson.details.get("session_id") or lesson.source_task_id or lesson.id
+            ),
             metadata={"owner": "cognition_updater", "truth_type": candidate.truth_type},
         )
         if submission.action == "apply":
@@ -279,7 +335,15 @@ class CognitionUpdater:
             )
             await self.candidate_manager.mark_applied(submission.candidate.id)
         elif submission.action == "hitl":
-            await self._create_evolution_candidate_task(lesson.user_id, submission.candidate)
+            await self._create_evolution_candidate_task(
+                lesson.user_id, submission.candidate
+            )
+        elif submission.action == "hold" and candidate.confirmed_by_user:
+            await self._apply_world_model_candidate(
+                lesson.user_id,
+                {"memory": asdict(candidate)},
+                event_id=lesson.id,
+            )
         elif self.relationship_state_machine is not None:
             await self.relationship_state_machine.evaluate(
                 user_id=lesson.user_id,
@@ -310,36 +374,108 @@ class CognitionUpdater:
                 recent_transition_reason=str(data.get("recent_transition_reason", "")),
                 recent_shared_events=list(data.get("recent_shared_events", [])),
             )
-            await self.core_memory_scheduler.write(user_id, "world_model", world_model, event_id=event_id)
+            await self.core_memory_scheduler.write(
+                user_id, "world_model", world_model, event_id=event_id
+            )
             return
         candidate = self._memory_from_dict(dict(proposed_change.get("memory", {})))
         if candidate is None:
             return
         if isinstance(candidate, RelationshipMemory):
-            world_model.relationship_history = self._merge_memory(world_model.relationship_history, candidate)
+            world_model.relationship_history = self._merge_memory(
+                world_model.relationship_history, candidate
+            )
             await self._promote_relationship(user_id, candidate)
         elif isinstance(candidate, FactualMemory):
-            world_model.confirmed_facts = self._merge_memory(world_model.confirmed_facts, candidate)
+            world_model.confirmed_facts = self._merge_memory(
+                world_model.confirmed_facts, candidate
+            )
         else:
             conflict = self._detect_conflict(world_model.confirmed_facts, candidate)
             if conflict is not None:
                 candidate.status = "conflicted"
                 candidate.conflict_with = [conflict.memory_key or conflict.content]
-                world_model.memory_conflicts = self._merge_memory(world_model.memory_conflicts, candidate)
+                world_model.memory_conflicts = self._merge_memory(
+                    world_model.memory_conflicts, candidate
+                )
             else:
-                world_model.inferred_memories = self._merge_memory(world_model.inferred_memories, candidate)
-        await self.core_memory_scheduler.write(user_id, "world_model", world_model, event_id=event_id)
+                world_model.inferred_memories = self._merge_memory(
+                    world_model.inferred_memories, candidate
+                )
+        await self.core_memory_scheduler.write(
+            user_id, "world_model", world_model, event_id=event_id
+        )
         if self.relationship_state_machine is not None:
-            await self.relationship_state_machine.evaluate(user_id=user_id, event_id=event_id)
+            await self.relationship_state_machine.evaluate(
+                user_id=user_id, event_id=event_id
+            )
 
     def _classify_memory(self, lesson: Lesson) -> DurableMemory:
         source = str(lesson.details.get("source", "lesson"))
-        content = lesson.lesson_text or lesson.summary or lesson.root_cause or "Captured lesson"
+        content = (
+            lesson.lesson_text
+            or lesson.summary
+            or lesson.root_cause
+            or "Captured lesson"
+        )
         confidence = float(lesson.confidence or 0.0)
         sensitivity = "sensitive" if lesson.details.get("sensitive") else "normal"
         updated_at = utc_now_iso()
         support_preference = str(lesson.details.get("support_preference", "")).strip()
-        proactivity_preference = str(lesson.details.get("proactivity_preference", "")).strip()
+        proactivity_preference = str(
+            lesson.details.get("proactivity_preference", "")
+        ).strip()
+        preference_relation = str(lesson.details.get("preference_relation", "")).strip()
+        preference_object = str(lesson.details.get("preference_object", "")).strip()
+
+        if (
+            lesson.domain == "explicit_preference"
+            and preference_relation in {"likes", "dislikes", "prefers", "uses"}
+            and preference_object
+        ):
+            memory_key = self._explicit_preference_memory_key(
+                preference_relation, preference_object
+            )
+            preference_content = content or self._explicit_preference_summary(
+                preference_relation, preference_object
+            )
+            if lesson.details.get("explicit_user_statement", False):
+                return FactualMemory(
+                    content=preference_content,
+                    source=source,
+                    confidence=max(confidence, 0.85),
+                    updated_at=updated_at,
+                    confirmed_by_user=bool(
+                        lesson.details.get("explicit_user_confirmation", True)
+                    ),
+                    time_horizon="long_term",
+                    status="active",
+                    sensitivity=sensitivity,
+                    memory_key=memory_key,
+                    metadata={
+                        "lesson_id": lesson.id,
+                        "category": lesson.category,
+                        "preference_relation": preference_relation,
+                        "preference_object": preference_object,
+                    },
+                )
+            return InferredMemory(
+                content=preference_content,
+                source=source,
+                confidence=max(confidence, 0.8),
+                updated_at=updated_at,
+                confirmed_by_user=False,
+                time_horizon="medium_term",
+                status="active",
+                sensitivity=sensitivity,
+                memory_key=memory_key.replace("fact:", "inference:", 1),
+                metadata={
+                    "lesson_id": lesson.id,
+                    "category": lesson.category,
+                    "preference_relation": preference_relation,
+                    "preference_object": preference_object,
+                },
+            )
 
         if lesson.domain == "support_preference" and support_preference in {
             "listening",
@@ -349,11 +485,14 @@ class CognitionUpdater:
             memory_key = f"support_preference:{support_preference}"
             if lesson.details.get("explicit_user_statement", False):
                 return FactualMemory(
-                    content=content or f"User prefers {support_preference.replace('_', '-')} support.",
+                    content=content
+                    or f"User prefers {support_preference.replace('_', '-')} support.",
                     source=source,
                     confidence=max(confidence, 0.85),
                     updated_at=updated_at,
-                    confirmed_by_user=bool(lesson.details.get("explicit_user_confirmation", True)),
+                    confirmed_by_user=bool(
+                        lesson.details.get("explicit_user_confirmation", True)
+                    ),
                     time_horizon="long_term",
                     status="active",
                     sensitivity=sensitivity,
@@ -361,7 +500,8 @@ class CognitionUpdater:
                     metadata={"lesson_id": lesson.id, "category": lesson.category},
                 )
             return InferredMemory(
-                content=content or f"User often prefers {support_preference.replace('_', '-')} support.",
+                content=content
+                or f"User often prefers {support_preference.replace('_', '-')} support.",
                 source=source,
                 confidence=max(confidence, 0.8),
                 updated_at=updated_at,
@@ -373,7 +513,10 @@ class CognitionUpdater:
                 metadata={"lesson_id": lesson.id, "category": lesson.category},
             )
 
-        if lesson.domain == "proactivity_preference" and proactivity_preference in {"allow", "suppress"}:
+        if lesson.domain == "proactivity_preference" and proactivity_preference in {
+            "allow",
+            "suppress",
+        }:
             memory_key = f"proactivity_preference:{proactivity_preference}"
             if lesson.details.get("explicit_user_statement", False):
                 return FactualMemory(
@@ -386,7 +529,9 @@ class CognitionUpdater:
                     source=source,
                     confidence=max(confidence, 0.85),
                     updated_at=updated_at,
-                    confirmed_by_user=bool(lesson.details.get("explicit_user_confirmation", True)),
+                    confirmed_by_user=bool(
+                        lesson.details.get("explicit_user_confirmation", True)
+                    ),
                     time_horizon="long_term",
                     status="active",
                     sensitivity=sensitivity,
@@ -413,11 +558,14 @@ class CognitionUpdater:
 
         if lesson.subject and lesson.relation and lesson.object:
             return RelationshipMemory(
-                content=content or f"{lesson.subject} {lesson.relation} {lesson.object}",
+                content=content
+                or f"{lesson.subject} {lesson.relation} {lesson.object}",
                 source=source,
                 confidence=confidence,
                 updated_at=updated_at,
-                confirmed_by_user=bool(lesson.details.get("explicit_user_confirmation", False)),
+                confirmed_by_user=bool(
+                    lesson.details.get("explicit_user_confirmation", False)
+                ),
                 time_horizon="long_term",
                 status="active",
                 sensitivity=sensitivity,
@@ -434,7 +582,9 @@ class CognitionUpdater:
                 source=source,
                 confidence=max(confidence, 0.8),
                 updated_at=updated_at,
-                confirmed_by_user=bool(lesson.details.get("explicit_user_confirmation", True)),
+                confirmed_by_user=bool(
+                    lesson.details.get("explicit_user_confirmation", True)
+                ),
                 time_horizon="long_term",
                 status="active",
                 sensitivity=sensitivity,
@@ -458,7 +608,11 @@ class CognitionUpdater:
     def _requires_confirmation(self, candidate: DurableMemory) -> bool:
         if str(candidate.memory_key).startswith("support_preference:"):
             return False
-        return candidate.sensitivity == "sensitive" or candidate.confidence < 0.75 or not candidate.confirmed_by_user
+        return (
+            candidate.sensitivity == "sensitive"
+            or candidate.confidence < 0.75
+            or not candidate.confirmed_by_user
+        )
 
     def _detect_conflict(
         self,
@@ -471,7 +625,9 @@ class CognitionUpdater:
                 return item
         return None
 
-    async def _promote_relationship(self, user_id: str, candidate: RelationshipMemory) -> None:
+    async def _promote_relationship(
+        self, user_id: str, candidate: RelationshipMemory
+    ) -> None:
         if self.graph_store is None:
             return
         await self.graph_store.upsert_relation(
@@ -489,7 +645,9 @@ class CognitionUpdater:
             metadata=dict(candidate.metadata),
         )
 
-    async def _create_memory_confirmation_task(self, lesson: Lesson, candidate: DurableMemory) -> None:
+    async def _create_memory_confirmation_task(
+        self, lesson: Lesson, candidate: DurableMemory
+    ) -> None:
         if self.task_store is None or self.blackboard is None:
             return
         confirmation = MemoryConfirmationRequest(
@@ -588,10 +746,14 @@ class CognitionUpdater:
         replaced = False
         for item in existing:
             if getattr(item, "memory_key", "") == getattr(candidate, "memory_key", ""):
-                if getattr(item, "confirmed_by_user", False) and not getattr(candidate, "confirmed_by_user", False):
+                if getattr(item, "confirmed_by_user", False) and not getattr(
+                    candidate, "confirmed_by_user", False
+                ):
                     merged.append(item)
                     continue
-                if getattr(candidate, "confirmed_by_user", False) and getattr(item, "confirmed_by_user", False):
+                if getattr(candidate, "confirmed_by_user", False) and getattr(
+                    item, "confirmed_by_user", False
+                ):
                     item.status = "superseded"
                     merged.append(item)
                 replaced = True
@@ -619,6 +781,25 @@ class CognitionUpdater:
             "summary": lesson.summary,
             "lesson_text": lesson.lesson_text,
             "content": lesson.root_cause,
-            "context_id": str(lesson.details.get("session_id") or lesson.source_task_id or lesson.id),
+            "context_id": str(
+                lesson.details.get("session_id") or lesson.source_task_id or lesson.id
+            ),
             "emotional_risk": lesson.details.get("emotional_risk"),
         }
+
+    @staticmethod
+    def _explicit_preference_memory_key(relation: str, object_value: str) -> str:
+        normalized_object = (
+            object_value.strip().lower().replace(" ", "_").replace("/", "_")
+        )
+        return f"fact:explicit_preference:{relation}:{normalized_object}"
+
+    @staticmethod
+    def _explicit_preference_summary(relation: str, object_value: str) -> str:
+        verb = {
+            "likes": "likes",
+            "dislikes": "dislikes",
+            "prefers": "prefers",
+            "uses": "uses",
+        }.get(relation, relation)
+        return f"User {verb} {object_value}."

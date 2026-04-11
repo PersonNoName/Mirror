@@ -9,6 +9,7 @@ from typing import Any
 from app.evolution.event_bus import Event, EventType
 from app.evolution.helpers import extract_json
 from app.providers.openai_compat import ProviderRequestError
+from app.tasks.models import Lesson
 
 
 class ObserverEngine:
@@ -25,7 +26,7 @@ class ObserverEngine:
         self.circuit_breaker: Any | None = None
         self._pending: dict[str, list[Event]] = defaultdict(list)
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
-        self._aliases = {"pyhton": "Python", "vsc": "VSCode", "vscode": "VSCode"}
+        self._aliases = {"pyhton": "Python", "py": "Python", "python": "Python", "vsc": "VSCode", "vscode": "VSCode"}
 
     async def handle_dialogue_ended(self, event: Event) -> None:
         user_id = event.payload.get("user_id", "")
@@ -46,6 +47,7 @@ class ObserverEngine:
             return
         dialogue = "\n".join(f"user: {e.payload.get('text', '')}\nassistant: {e.payload.get('reply', '')}" for e in events)
         triples = await self._extract_triples(dialogue)
+        last = events[-1]
         for triple in triples:
             aligned = self._align_triple(triple)
             if self.graph_store is not None:
@@ -64,7 +66,14 @@ class ObserverEngine:
                     content=f'{aligned["subject"]} {aligned["relation"]} {aligned["object"]}',
                     metadata={"confidence": aligned.get("confidence", 0.7)},
                 )
-        last = events[-1]
+            lesson = self._triple_to_lesson(last, aligned)
+            if lesson is not None:
+                await self.event_bus.emit(
+                    Event(
+                        type=EventType.LESSON_GENERATED,
+                        payload={"lesson": self._lesson_payload(lesson)},
+                    )
+                )
         await self.event_bus.emit(
             Event(
                 type=EventType.OBSERVATION_DONE,
@@ -86,8 +95,12 @@ class ObserverEngine:
                 {
                     "role": "system",
                     "content": (
-                        "从对话中抽取 JSON 数组三元组。关系仅允许 "
-                        "PREFERS / DISLIKES / USES / KNOWS / HAS_CONSTRAINT / IS_GOOD_AT / IS_WEAK_AT。"
+                        "Extract a JSON array of durable user triples from the dialogue. "
+                        "Only extract facts the user explicitly stated about themselves. "
+                        "Use subject='user' for the user. "
+                        "Allowed relations only: PREFERS, DISLIKES, USES, KNOWS, HAS_CONSTRAINT, IS_GOOD_AT, IS_WEAK_AT. "
+                        "Each item must be an object with subject, relation, object, and confidence. "
+                        "If there is no durable explicit user fact, return []."
                     ),
                 },
                 {"role": "user", "content": dialogue},
@@ -107,4 +120,60 @@ class ObserverEngine:
             value = str(aligned.get(side, "")).strip()
             canonical = self._aliases.get(value.lower(), value)
             aligned[side] = canonical
+        aligned["relation"] = str(aligned.get("relation", "")).strip().upper()
         return aligned
+
+    @staticmethod
+    def _triple_to_lesson(event: Event, triple: dict[str, Any]) -> Lesson | None:
+        subject = str(triple.get("subject", "")).strip().lower()
+        relation = str(triple.get("relation", "")).strip().upper()
+        object_value = str(triple.get("object", "")).strip()
+        if subject not in {"user", "the user"} or not object_value:
+            return None
+        relation_map = {
+            "PREFERS": "prefers",
+            "DISLIKES": "dislikes",
+            "USES": "uses",
+        }
+        preference_relation = relation_map.get(relation)
+        if preference_relation is None:
+            return None
+        summary = f"User {preference_relation} {object_value}."
+        return Lesson(
+            source_task_id=event.id,
+            user_id=event.payload.get("user_id", ""),
+            domain="explicit_preference",
+            outcome="observed",
+            category="observer_explicit_preference",
+            summary=summary,
+            lesson_text=summary,
+            details={
+                "source": "observer_triple",
+                "session_id": event.payload.get("session_id", ""),
+                "explicit_user_statement": True,
+                "explicit_user_confirmation": True,
+                "preference_relation": preference_relation,
+                "preference_object": object_value,
+            },
+            confidence=float(triple.get("confidence", 0.85)),
+        )
+
+    @staticmethod
+    def _lesson_payload(lesson: Lesson) -> dict[str, Any]:
+        return {
+            "id": lesson.id,
+            "source_task_id": lesson.source_task_id,
+            "user_id": lesson.user_id,
+            "domain": lesson.domain,
+            "outcome": lesson.outcome,
+            "category": lesson.category,
+            "summary": lesson.summary,
+            "root_cause": lesson.root_cause,
+            "lesson_text": lesson.lesson_text,
+            "is_agent_capability_issue": lesson.is_agent_capability_issue,
+            "subject": lesson.subject,
+            "relation": lesson.relation,
+            "object": lesson.object,
+            "details": lesson.details,
+            "confidence": lesson.confidence,
+        }

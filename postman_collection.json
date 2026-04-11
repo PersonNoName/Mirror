@@ -1,0 +1,253 @@
+{
+  "info": {
+    "name": "Mirror API",
+    "description": "Mirror - 本地优先 AI Agent 运行时 API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8000"
+    }
+  ],
+  "item": [
+    {
+      "name": "健康检查",
+      "event": [],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/health",
+          "host": ["{{baseUrl}}"],
+          "path": ["health"]
+        },
+        "description": "检查服务健康状态"
+      },
+      "response": []
+    },
+    {
+      "name": "对话",
+      "event": [],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"text\": \"你好\",\n    \"session_id\": \"test-session-1\",\n    \"user_id\": \"user-1\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/chat",
+          "host": ["{{baseUrl}}"],
+          "path": ["chat"]
+        },
+        "description": "同步对话接口"
+      },
+      "response": []
+    },
+    {
+      "name": "流式对话",
+      "event": [],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/chat/stream?session_id=test-session-1",
+          "host": ["{{baseUrl}}"],
+          "path": ["chat", "stream"],
+          "query": [
+            {
+              "key": "session_id",
+              "value": "test-session-1",
+              "description": "会话ID"
+            }
+          ]
+        },
+        "description": "SSE 流式对话接口"
+      },
+      "response": []
+    },
+    {
+      "name": "查看记忆列表",
+      "event": [],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/memory?user_id=user-1",
+          "host": ["{{baseUrl}}"],
+          "path": ["memory"],
+          "query": [
+            {
+              "key": "user_id",
+              "value": "user-1",
+              "description": "用户ID"
+            },
+            {
+              "key": "include_candidates",
+              "value": "true",
+              "description": "包含候选记忆"
+            },
+            {
+              "key": "include_superseded",
+              "value": "false",
+              "description": "包含被取代的记忆"
+            }
+          ]
+        },
+        "description": "查看用户记忆列表"
+      },
+      "response": []
+    },
+    {
+      "name": "查看记忆治理策略",
+      "event": [],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/memory/governance?user_id=user-1",
+          "host": ["{{baseUrl}}"],
+          "path": ["memory", "governance"],
+          "query": [
+            {
+              "key": "user_id",
+              "value": "user-1",
+              "description": "用户ID"
+            }
+          ]
+        },
+        "description": "查看记忆治理策略"
+      },
+      "response": []
+    },
+    {
+      "name": "阻止记忆学习",
+      "event": [],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"user_id\": \"user-1\",\n    \"content_class\": \"support_preference\",\n    \"blocked\": true\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/memory/governance/block",
+          "host": ["{{baseUrl}}"],
+          "path": ["memory", "governance", "block"]
+        },
+        "description": "阻止某类内容继续学习"
+      },
+      "response": []
+    },
+    {
+      "name": "修正记忆",
+      "event": [],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"user_id\": \"user-1\",\n    \"memory_key\": \"inference:tone:direct\",\n    \"corrected_content\": \"用户更喜欢详细谨慎的回答\",\n    \"truth_type\": \"fact\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/memory/correct",
+          "host": ["{{baseUrl}}"],
+          "path": ["memory", "correct"]
+        },
+        "description": "修正记忆内容"
+      },
+      "response": []
+    },
+    {
+      "name": "删除记忆",
+      "event": [],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"user_id\": \"user-1\",\n    \"memory_key\": \"fact:tone:direct\",\n    \"reason\": \"信息有误\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/memory/delete",
+          "host": ["{{baseUrl}}"],
+          "path": ["memory", "delete"]
+        },
+        "description": "删除指定记忆"
+      },
+      "response": []
+    },
+    {
+      "name": "查看进化日志",
+      "event": [],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/evolution/journal?user_id=user-1&limit=10",
+          "host": ["{{baseUrl}}"],
+          "path": ["evolution", "journal"],
+          "query": [
+            {
+              "key": "user_id",
+              "value": "user-1",
+              "description": "用户ID"
+            },
+            {
+              "key": "limit",
+              "value": "10",
+              "description": "返回条数限制"
+            }
+          ]
+        },
+        "description": "查看进化日志"
+      },
+      "response": []
+    },
+    {
+      "name": "HITL 任务响应",
+      "event": [],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"task_id\": \"task-1\",\n    \"decision\": \"approve\",\n    \"payload\": {\n        \"safe\": true\n    }\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/hitl/respond",
+          "host": ["{{baseUrl}}"],
+          "path": ["hitl", "respond"]
+        },
+        "description": "人工审批 HITL 任务 (decision: approve/reject/defer)"
+      },
+      "response": []
+    }
+  ]
+}

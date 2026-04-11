@@ -459,3 +459,52 @@ async def test_proactivity_preference_lesson_uses_stable_memory_key() -> None:
 
     assert scheduler.calls
     assert core_memory.world_model.confirmed_facts[0].memory_key == "proactivity_preference:suppress"
+
+
+@pytest.mark.asyncio
+async def test_explicit_preference_lesson_is_promoted_to_factual_memory_with_stable_key() -> None:
+    core_memory = CoreMemory()
+    scheduler = RecordingScheduler(core_memory)
+    candidate_manager = EvolutionCandidateManager(EvolutionJournal())
+    updater = CognitionUpdater(
+        core_memory_cache=DummyCoreMemoryCache(core_memory),
+        core_memory_scheduler=scheduler,
+        graph_store=RecordingGraphStore(),
+        candidate_manager=candidate_manager,
+    )
+    lesson = Lesson(
+        user_id="user-1",
+        domain="explicit_preference",
+        summary="User likes Python.",
+        confidence=0.96,
+        details={
+            "preference_relation": "likes",
+            "preference_object": "Python",
+            "explicit_user_statement": True,
+            "explicit_user_confirmation": True,
+            "session_id": "session-a",
+        },
+    )
+
+    await updater._update_world_model(lesson)
+    await updater._update_world_model(
+        Lesson(
+            user_id="user-1",
+            domain="explicit_preference",
+            summary="User likes Python.",
+            confidence=0.96,
+            details={
+                "preference_relation": "likes",
+                "preference_object": "Python",
+                "explicit_user_statement": True,
+                "explicit_user_confirmation": True,
+                "session_id": "session-b",
+            },
+        )
+    )
+
+    assert scheduler.calls
+    stored = core_memory.world_model.confirmed_facts[0]
+    assert isinstance(stored, FactualMemory)
+    assert stored.content == "User likes Python."
+    assert stored.memory_key == "fact:explicit_preference:likes:python"
