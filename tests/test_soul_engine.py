@@ -9,6 +9,7 @@ from app.memory import (
     FactualMemory,
     InferredMemory,
     MemoryEntry,
+    RelationshipStageState,
     RelationshipMemory,
 )
 from app.platform.base import InboundMessage, PlatformContext
@@ -58,6 +59,39 @@ async def test_soul_engine_run_parses_valid_action() -> None:
     assert action.type == "direct_reply"
     assert action.content == "hello back"
     assert action.inner_thoughts == "think"
+
+
+@pytest.mark.asyncio
+async def test_soul_engine_high_risk_emotional_message_short_circuits_to_safe_reply() -> None:
+    chat_model = DummyChatModel(
+        response={
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "<inner_thoughts>delegate</inner_thoughts>"
+                            "<action>publish_task</action>"
+                            "<content>dangerous</content>"
+                        )
+                    }
+                }
+            ]
+        }
+    )
+    engine = SoulEngine(
+        model_registry=DummyModelRegistry(chat_model=chat_model),
+        core_memory_cache=DummyCoreMemoryCache(),
+        session_context_store=DummySessionContextStore(),
+        vector_retriever=DummyVectorRetriever(),
+        tool_registry=DummyToolCatalog(),
+    )
+
+    action = await engine.run(build_message("I want to kill myself and I can't go on"))
+
+    assert action.type == "direct_reply"
+    assert "immediate risk" in action.content
+    assert action.metadata["emotional_risk"] == "high"
+    assert chat_model.calls == []
 
 
 def test_parse_action_rejects_invalid_action_type() -> None:
@@ -145,6 +179,15 @@ def test_soul_engine_build_prompt_formats_memory_blocks_for_model_usefulness() -
             memory_key="inference:tone:direct",
         )
     )
+    core_memory.world_model.confirmed_facts.append(
+        FactualMemory(
+            content="User prefers listening-first support",
+            source="dialogue_signal",
+            confidence=0.95,
+            confirmed_by_user=True,
+            memory_key="support_preference:listening",
+        )
+    )
     core_memory.world_model.relationship_history.append(
         RelationshipMemory(
             content="user PREFERS concise responses",
@@ -181,6 +224,13 @@ def test_soul_engine_build_prompt_formats_memory_blocks_for_model_usefulness() -
     core_memory.personality.relationship_style.boundary_strength = 0.88
     core_memory.personality.relationship_style.supportiveness = 0.61
     core_memory.personality.relationship_style.preferred_closeness = "steady"
+    core_memory.world_model.relationship_stage = RelationshipStageState(
+        stage="repair_and_recovery",
+        confidence=0.82,
+        recent_transition_reason="Recent repair signal detected.",
+        repair_needed=True,
+        recent_shared_events=["User said the assistant misunderstood an important boundary."],
+    )
     core_memory.personality.session_adaptation.current_items = ["Keep answers short"]
     core_memory.task_experience.lesson_digest.append(MemoryEntry(content="Prefer bounded retries"))
     core_memory.task_experience.domain_tips["python"] = [MemoryEntry(content="Prefer pytest for test coverage")]
@@ -220,6 +270,12 @@ def test_soul_engine_build_prompt_formats_memory_blocks_for_model_usefulness() -
                 }
             ]
         },
+        emotional_context=engine._interpret_emotion("I feel overwhelmed today", core_memory),
+        support_policy=engine._build_support_policy(
+            "I feel overwhelmed today",
+            core_memory,
+            engine._interpret_emotion("I feel overwhelmed today", core_memory),
+        ),
     )
 
     assert "SelfCognition(" not in prompt
@@ -236,11 +292,20 @@ def test_soul_engine_build_prompt_formats_memory_blocks_for_model_usefulness() -
     assert "Relationship Style" in prompt
     assert "- warmth=0.45" in prompt
     assert "- boundary_strength=0.88" in prompt
+    assert "Relationship Stage" in prompt
+    assert "- stage=repair_and_recovery" in prompt
+    assert "- repair_needed=true" in prompt
+    assert "Reduce assertive memory claims and avoid overfamiliar phrasing." in prompt
+    assert "Emotional Context" in prompt
+    assert "- emotion_class=overwhelm" in prompt
+    assert "Support Policy" in prompt
+    assert "- support_mode=listening" in prompt
     assert "Session Adaptation" in prompt
     assert "These adaptations are temporary and only apply to the current session." in prompt
     assert "Keep answers short" in prompt
     assert "Confirmed Facts:" in prompt
     assert "[fact|confirmed|confidence=1.00|source=system] No direct shell outside workspace" in prompt
+    assert "[support_preference|fact|confirmed|confidence=0.95|source=dialogue_signal] User prefers listening-first support" in prompt
     assert "Inferred Memory:" in prompt
     assert "User prefers direct, concise answers" in prompt
     assert "Relationship History:" in prompt
@@ -272,6 +337,12 @@ def test_soul_engine_build_prompt_uses_stable_empty_memory_fallbacks() -> None:
         recent_messages=[],
         session_adaptations_live=[],
         retrieved={"matches": []},
+        emotional_context=engine._interpret_emotion("hello", core_memory),
+        support_policy=engine._build_support_policy(
+            "hello",
+            core_memory,
+            engine._interpret_emotion("hello", core_memory),
+        ),
     )
 
     assert "SelfCognition(" not in prompt
@@ -282,3 +353,23 @@ def test_soul_engine_build_prompt_uses_stable_empty_memory_fallbacks() -> None:
     assert "No active session adaptations for this session." in prompt
     assert "- No lesson digests recorded." in prompt
     assert "- No retrieved context." in prompt
+
+
+def test_support_policy_prefers_current_explicit_request_over_stored_preference() -> None:
+    core_memory = CoreMemory()
+    core_memory.world_model.confirmed_facts.append(
+        FactualMemory(
+            content="User prefers listening-first support",
+            source="dialogue_signal",
+            confidence=0.95,
+            confirmed_by_user=True,
+            memory_key="support_preference:listening",
+        )
+    )
+
+    emotional_context = SoulEngine._interpret_emotion("Tell me what to do right now", core_memory)
+    policy = SoulEngine._build_support_policy("Tell me what to do right now", core_memory, emotional_context)
+
+    assert policy.stored_preference == "listening"
+    assert policy.inferred_preference == "problem_solving"
+    assert policy.support_mode == "problem_solving"

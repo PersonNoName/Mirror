@@ -195,3 +195,31 @@ class GraphStore:
             for item in relations
         ]
         return "; ".join(lines)
+
+    async def supersede_relation(
+        self,
+        *,
+        user_id: str,
+        subject: str,
+        relation: str,
+        object: str,
+        reason: str = "",
+    ) -> None:
+        relation = self._validate_relation(relation)
+        query = f"""
+        MATCH (s:MemoryEntity {{user_id: $user_id, name: $subject}})
+              -[r:{relation} {{user_id: $user_id}}]->
+              (o:MemoryEntity {{user_id: $user_id, name: $object}})
+        SET r.status = 'superseded',
+            r.updated_at = $updated_at,
+            r.metadata_json = $metadata_json
+        """
+        async with self._driver.session(database=self.database) as session:
+            await session.run(
+                query,
+                user_id=user_id,
+                subject=subject,
+                object=object,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+                metadata_json=json.dumps({"governance_reason": reason, "deleted_by_user": True}),
+            )

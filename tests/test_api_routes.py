@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.api.chat import router as chat_router
 from app.api.hitl import router as hitl_router
 from app.api.journal import router as journal_router
+from app.api.memory import router as memory_router
 from app.platform.web import WebPlatformAdapter
 
 
@@ -83,6 +84,68 @@ class StaticEvolutionJournal:
         return self.items[:limit]
 
 
+class RecordingMemoryGovernanceService:
+    def __init__(self) -> None:
+        self.list_calls: list[tuple[str, bool, bool]] = []
+        self.get_policy_calls: list[str] = []
+        self.block_calls: list[tuple[str, str, bool]] = []
+        self.correct_calls: list[dict[str, Any]] = []
+        self.delete_calls: list[tuple[str, str, str]] = []
+        self.memory_items: list[dict[str, Any]] = []
+        self.policy = {
+            "blocked_content_classes": [],
+            "retention_days": {
+                "fact": 0,
+                "relationship": 0,
+                "inference": 30,
+                "pending_confirmation": 7,
+                "memory_conflicts": 30,
+                "candidate": 7,
+            },
+            "updated_at": "2026-04-11T10:00:00+00:00",
+        }
+
+    async def list_memory(self, *, user_id: str, include_candidates: bool = True, include_superseded: bool = False):
+        self.list_calls.append((user_id, include_candidates, include_superseded))
+        return list(self.memory_items)
+
+    async def get_policy(self, user_id: str):
+        self.get_policy_calls.append(user_id)
+        return SimpleNamespace(**self.policy)
+
+    async def set_blocked(self, *, user_id: str, content_class: str, blocked: bool):
+        self.block_calls.append((user_id, content_class, blocked))
+        classes = set(self.policy["blocked_content_classes"])
+        if blocked:
+            classes.add(content_class)
+        else:
+            classes.discard(content_class)
+        self.policy["blocked_content_classes"] = sorted(classes)
+        return SimpleNamespace(**self.policy)
+
+    async def correct_memory(self, **kwargs: Any):
+        self.correct_calls.append(kwargs)
+        if kwargs["memory_key"] == "missing":
+            raise KeyError("missing")
+        return {
+            "memory_key": kwargs["memory_key"] + ":corrected",
+            "content": kwargs["corrected_content"],
+            "truth_type": kwargs["truth_type"],
+            "status": "active",
+            "source": "user_correction",
+            "confidence": 1.0,
+            "confirmed_by_user": True,
+            "updated_at": "2026-04-11T10:00:00+00:00",
+            "visibility": "durable",
+        }
+
+    async def delete_memory(self, *, user_id: str, memory_key: str, reason: str):
+        self.delete_calls.append((user_id, memory_key, reason))
+        if memory_key == "missing":
+            raise KeyError("missing")
+        return None
+
+
 class PreloadedWebPlatformAdapter(WebPlatformAdapter):
     def __init__(self, events: list[dict[str, Any]] | None = None) -> None:
         super().__init__()
@@ -104,12 +167,14 @@ def build_test_app(
     task_system: Any | None = None,
     event_bus: Any | None = None,
     evolution_journal: Any | None = None,
+    memory_governance_service: Any | None = None,
     streaming_disabled: bool = False,
 ) -> FastAPI:
     app = FastAPI()
     app.include_router(chat_router)
     app.include_router(hitl_router)
     app.include_router(journal_router)
+    app.include_router(memory_router)
     app.state.web_platform = web_platform or WebPlatformAdapter()
     app.state.core_memory_cache = RecordingCoreMemoryCache()
     app.state.session_context_store = RecordingSessionContextStore()
@@ -122,6 +187,7 @@ def build_test_app(
     app.state.event_bus = event_bus or RecordingEventBus()
     app.state.event_bus_event_factory = lambda event_type, payload: {"type": event_type, "payload": payload}
     app.state.evolution_journal = evolution_journal or StaticEvolutionJournal(items=[])
+    app.state.memory_governance_service = memory_governance_service or RecordingMemoryGovernanceService()
     app.state.streaming_disabled = streaming_disabled
     return app
 
@@ -293,3 +359,96 @@ def test_evolution_journal_returns_typed_envelope() -> None:
         ],
         "count": 1,
     }
+
+
+def test_memory_routes_return_governed_memory_and_policy() -> None:
+    service = RecordingMemoryGovernanceService()
+    service.memory_items = [
+        {
+            "memory_key": "fact:preferences:short",
+            "content": "User prefers short answers",
+            "truth_type": "fact",
+            "status": "active",
+            "source": "user",
+            "confidence": 1.0,
+            "confirmed_by_user": True,
+            "updated_at": "2026-04-11T10:00:00+00:00",
+            "visibility": "durable",
+        },
+        {
+            "memory_key": "support_preference:listening",
+            "content": "User prefers listening-first support",
+            "truth_type": "fact",
+            "status": "candidate",
+            "source": "dialogue_signal",
+            "confidence": 0.9,
+            "confirmed_by_user": False,
+            "updated_at": "2026-04-11T09:00:00+00:00",
+            "visibility": "candidate",
+        },
+    ]
+    app = build_test_app(memory_governance_service=service)
+    client = TestClient(app)
+
+    memory_response = client.get("/memory", params={"user_id": "user-1"})
+    policy_response = client.get("/memory/governance", params={"user_id": "user-1"})
+
+    assert memory_response.status_code == 200
+    assert memory_response.json()["count"] == 2
+    assert memory_response.json()["items"][1]["visibility"] == "candidate"
+    assert policy_response.status_code == 200
+    assert policy_response.json()["blocked_content_classes"] == []
+
+
+def test_memory_routes_support_correct_delete_and_block() -> None:
+    service = RecordingMemoryGovernanceService()
+    app = build_test_app(memory_governance_service=service)
+    client = TestClient(app)
+
+    correct_response = client.post(
+        "/memory/correct",
+        json={
+            "user_id": "user-1",
+            "memory_key": "inference:tone:direct",
+            "corrected_content": "User prefers careful detailed answers",
+            "truth_type": "fact",
+        },
+    )
+    delete_response = client.post(
+        "/memory/delete",
+        json={"user_id": "user-1", "memory_key": "fact:tone:direct", "reason": "wrong"},
+    )
+    block_response = client.post(
+        "/memory/governance/block",
+        json={"user_id": "user-1", "content_class": "support_preference", "blocked": True},
+    )
+
+    assert correct_response.status_code == 200
+    assert correct_response.json()["item"]["source"] == "user_correction"
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"status": "ok", "memory_key": "fact:tone:direct"}
+    assert block_response.status_code == 200
+    assert "support_preference" in block_response.json()["policy"]["blocked_content_classes"]
+
+
+def test_memory_routes_return_404_for_missing_memory_key() -> None:
+    service = RecordingMemoryGovernanceService()
+    app = build_test_app(memory_governance_service=service)
+    client = TestClient(app)
+
+    correct_response = client.post(
+        "/memory/correct",
+        json={
+            "user_id": "user-1",
+            "memory_key": "missing",
+            "corrected_content": "x",
+            "truth_type": "fact",
+        },
+    )
+    delete_response = client.post(
+        "/memory/delete",
+        json={"user_id": "user-1", "memory_key": "missing", "reason": "wrong"},
+    )
+
+    assert correct_response.status_code == 404
+    assert delete_response.status_code == 404

@@ -15,6 +15,14 @@ TruthType = Literal["fact", "inference", "relationship"]
 TimeHorizon = Literal["short_term", "medium_term", "long_term"]
 MemoryStatus = Literal["active", "pending_confirmation", "conflicted", "superseded"]
 Sensitivity = Literal["normal", "sensitive"]
+GovernanceContentClass = Literal["fact", "inference", "relationship", "support_preference"]
+RelationshipStage = Literal[
+    "unfamiliar",
+    "trust_building",
+    "stable_companion",
+    "vulnerable_support",
+    "repair_and_recovery",
+]
 
 
 def utc_now_iso() -> str:
@@ -72,6 +80,38 @@ class RelationshipMemory(DurableMemory):
     relation: str = ""
     object: str = ""
     truth_type: TruthType = "relationship"
+
+
+@dataclass(slots=True)
+class RelationshipStageState:
+    """Current relationship-stage snapshot used to modulate foreground behavior."""
+
+    stage: RelationshipStage = "unfamiliar"
+    confidence: float = 0.0
+    updated_at: str = field(default_factory=utc_now_iso)
+    entered_at: str = field(default_factory=utc_now_iso)
+    supports_vulnerability: bool = False
+    repair_needed: bool = False
+    recent_transition_reason: str = ""
+    recent_shared_events: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class MemoryGovernancePolicy:
+    """Per-user governance policy for user-visible world-model memory."""
+
+    blocked_content_classes: list[GovernanceContentClass] = field(default_factory=list)
+    retention_days: dict[str, int] = field(
+        default_factory=lambda: {
+            "fact": 0,
+            "relationship": 0,
+            "inference": 30,
+            "pending_confirmation": 7,
+            "memory_conflicts": 30,
+            "candidate": 7,
+        }
+    )
+    updated_at: str = field(default_factory=utc_now_iso)
 
 
 @dataclass(slots=True)
@@ -163,6 +203,8 @@ class WorldModel:
     confirmed_facts: list[FactualMemory] = field(default_factory=list)
     inferred_memories: list[InferredMemory] = field(default_factory=list)
     relationship_history: list[RelationshipMemory] = field(default_factory=list)
+    relationship_stage: RelationshipStageState = field(default_factory=RelationshipStageState)
+    memory_governance: MemoryGovernancePolicy = field(default_factory=MemoryGovernancePolicy)
     pending_confirmations: list[DurableMemory] = field(default_factory=list)
     memory_conflicts: list[DurableMemory] = field(default_factory=list)
 

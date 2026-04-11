@@ -110,6 +110,19 @@ class PersonalityEvolver:
             await self._apply_personality_candidates(user_id, applicable)
         self._signal_buffer[user_id] = []
 
+    async def apply_candidates(
+        self,
+        user_id: str,
+        candidates: list[EvolutionCandidate],
+        *,
+        event_id: str | None = None,
+    ) -> None:
+        """Apply already-approved personality or relationship-style candidates."""
+
+        if not candidates:
+            return
+        await self._apply_personality_candidates(user_id, candidates, event_id=event_id)
+
     async def handle_hitl_feedback(self, event: Any) -> None:
         if self.task_store is None:
             return

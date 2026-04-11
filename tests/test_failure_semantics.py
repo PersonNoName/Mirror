@@ -231,6 +231,8 @@ def test_bind_runtime_state_disables_streaming_when_redis_missing() -> None:
                 "degraded": False,
             }
         ),
+        relationship_state_machine=SimpleNamespace(degraded=False),
+        memory_governance_service=SimpleNamespace(degraded=False),
         personality_evolver=SimpleNamespace(),
         observer=SimpleNamespace(),
         reflector=SimpleNamespace(),

@@ -19,7 +19,7 @@ from app.memory import CoreMemoryCache, SessionContextStore, VectorRetriever
 from app.platform.base import InboundMessage
 from app.providers.openai_compat import ProviderRequestError
 from app.providers.registry import ModelProviderRegistry
-from app.soul.models import Action
+from app.soul.models import Action, EmotionalInterpretation, SupportPolicyDecision
 
 
 SOUL_SYSTEM_PROMPT_TEMPLATE = """
@@ -38,6 +38,15 @@ You are a direct collaborator, not a submissive assistant.
 ## Relationship Style
 {relationship_style}
 
+## Relationship Stage
+{relationship_stage}
+
+## Emotional Context
+{emotional_context}
+
+## Support Policy
+{support_policy}
+
 ## Session Adaptation
 {session_adaptations}
 
@@ -53,6 +62,11 @@ You are a direct collaborator, not a submissive assistant.
 - Treat confirmed facts as highest-trust memory.
 - Never present an inferred memory as if the user explicitly confirmed it.
 - If memory conflicts exist, answer conservatively or ask for confirmation.
+- In listening mode, prioritize acknowledgement, clarification, and presence over advice.
+- In problem-solving mode, give bounded suggestions without sounding commanding or clinical.
+- In blended mode, acknowledge feelings first, then offer a small number of optional next steps.
+- Stored support preferences are hints only; current explicit user intent takes precedence.
+- In safety-constrained mode, avoid tool/task escalation and keep advice conservative.
 - Think before acting. Every action must follow the required output format.
 
 ## Output Format
@@ -97,7 +111,30 @@ class SoulEngine:
         recent_messages = await self._get_recent_messages(message)
         session_adaptations = await self._get_session_adaptations(message)
         retrieved = await self._retrieve_context(message)
-        prompt = self._build_prompt(core_memory, recent_messages, session_adaptations, retrieved)
+        emotional_context = self._interpret_emotion(message.text, core_memory)
+        support_policy = self._build_support_policy(message.text, core_memory, emotional_context)
+        emotional_context.support_mode = support_policy.support_mode
+        emotional_context.support_preference = support_policy.inferred_preference
+
+        if emotional_context.emotional_risk == "high":
+            action = self._high_risk_emotional_action(message, emotional_context)
+            if self.hook_registry is not None:
+                await self.hook_registry.trigger(
+                    HookPoint.POST_REASON,
+                    message=message,
+                    action=action,
+                    prompt="",
+                )
+            return action
+
+        prompt = self._build_prompt(
+            core_memory,
+            recent_messages,
+            session_adaptations,
+            retrieved,
+            emotional_context,
+            support_policy,
+        )
 
         api_key = self.model_registry.specs["reasoning.main"].api_key_ref
         if not api_key:
@@ -164,6 +201,8 @@ class SoulEngine:
         recent_messages: list[dict[str, Any]],
         session_adaptations_live: list[str],
         retrieved: dict[str, Any],
+        emotional_context: EmotionalInterpretation,
+        support_policy: SupportPolicyDecision,
     ) -> str:
         tool_descriptions = self.tool_registry.describe_tools()
         tool_list = "\n".join(
@@ -199,6 +238,9 @@ class SoulEngine:
                     world_model=self._format_world_model(core_memory.world_model),
                     stable_identity=self._format_stable_identity(core_memory, behavioral_rules),
                     relationship_style=self._format_relationship_style(core_memory),
+                    relationship_stage=self._format_relationship_stage(core_memory.world_model),
+                    emotional_context=self._format_emotional_context(emotional_context),
+                    support_policy=self._format_support_policy(support_policy),
                     session_adaptations=(
                         "These adaptations are temporary and only apply to the current session.\n"
                         f"{session_adaptations}"
@@ -314,6 +356,34 @@ class SoulEngine:
         )
 
     @staticmethod
+    def _format_relationship_stage(world_model: WorldModel) -> str:
+        stage = world_model.relationship_stage
+        behavior_hint = {
+            "unfamiliar": "Use stronger boundaries and cite memory conservatively.",
+            "trust_building": "Use light familiarity and confirm memory carefully.",
+            "stable_companion": "Use continuity naturally, but keep commitments bounded.",
+            "vulnerable_support": "Prioritize support and conservative suggestions without expanding promises.",
+            "repair_and_recovery": "Reduce assertive memory claims and avoid overfamiliar phrasing.",
+        }.get(stage.stage, "Use stronger boundaries and cite memory conservatively.")
+        shared_events = (
+            "\n".join(f"- {item}" for item in stage.recent_shared_events[:3])
+            if stage.recent_shared_events
+            else "- No recent shared events recorded."
+        )
+        return "\n".join(
+            [
+                f"- stage={stage.stage}",
+                f"- confidence={stage.confidence:.2f}",
+                f"- supports_vulnerability={str(stage.supports_vulnerability).lower()}",
+                f"- repair_needed={str(stage.repair_needed).lower()}",
+                f"- recent_transition_reason={stage.recent_transition_reason or 'No recent transition recorded.'}",
+                f"- behavior_hint={behavior_hint}",
+                "Recent Shared Events:",
+                shared_events,
+            ]
+        )
+
+    @staticmethod
     def _format_durable_entries(entries: list[DurableMemory], empty_text: str) -> str:
         lines = []
         for entry in entries:
@@ -321,9 +391,14 @@ class SoulEngine:
             if not content:
                 continue
             status = "confirmed" if entry.confirmed_by_user else entry.status
-            lines.append(
-                f"- [{entry.truth_type}|{status}|confidence={entry.confidence:.2f}|source={entry.source}] {content}"
-            )
+            if str(entry.memory_key).startswith("support_preference:"):
+                lines.append(
+                    f"- [support_preference|{entry.truth_type}|{status}|confidence={entry.confidence:.2f}|source={entry.source}] {content}"
+                )
+            else:
+                lines.append(
+                    f"- [{entry.truth_type}|{status}|confidence={entry.confidence:.2f}|source={entry.source}] {content}"
+                )
         return "\n".join(lines) or f"- {empty_text}"
 
     @staticmethod
@@ -339,6 +414,30 @@ class SoulEngine:
                 f"- [relationship|{status}|confidence={entry.confidence:.2f}|source={entry.source}] {content}"
             )
         return "\n".join(lines) or f"- {empty_text}"
+
+    @staticmethod
+    def _format_emotional_context(emotional_context: EmotionalInterpretation) -> str:
+        return "\n".join(
+            [
+                f"- emotion_class={emotional_context.emotion_class}",
+                f"- intensity={emotional_context.intensity}",
+                f"- duration_hint={emotional_context.duration_hint}",
+                f"- support_preference={emotional_context.support_preference}",
+                f"- support_mode={emotional_context.support_mode}",
+                f"- emotional_risk={emotional_context.emotional_risk}",
+            ]
+        )
+
+    @staticmethod
+    def _format_support_policy(policy: SupportPolicyDecision) -> str:
+        return "\n".join(
+            [
+                f"- support_mode={policy.support_mode}",
+                f"- inferred_preference={policy.inferred_preference}",
+                f"- stored_preference={policy.stored_preference}",
+                f"- rationale={policy.rationale or 'No additional policy rationale.'}",
+            ]
+        )
 
     @classmethod
     def _format_task_experience(cls, task_experience: TaskExperience) -> str:
@@ -395,6 +494,217 @@ class SoulEngine:
             type=action_type,
             content=content_match.group(1).strip(),
             inner_thoughts=inner_match.group(1).strip() if inner_match else "",
+        )
+
+    @classmethod
+    def _interpret_emotion(cls, text: str, core_memory: CoreMemory) -> EmotionalInterpretation:
+        normalized = text.lower()
+        support_preference = cls._resolve_stored_support_preference(core_memory.world_model)
+        emotion_class = "neutral"
+        intensity = "low"
+        duration_hint = "unknown"
+        emotional_risk = cls._emotional_risk(normalized)
+
+        emotion_keywords = {
+            "overwhelm": ("overwhelmed", "撑不住", "太多了", "崩溃", "burned out"),
+            "anxiety": ("anxious", "anxiety", "panic", "紧张", "害怕", "慌"),
+            "sadness": ("sad", "depressed", "难过", "伤心", "低落"),
+            "loneliness": ("lonely", "alone", "孤独", "没人懂"),
+            "anger": ("angry", "furious", "气死", "愤怒"),
+            "frustration": ("frustrated", "annoyed", "烦", "挫败", "受不了"),
+            "relief": ("relieved", "松了口气", "终于好了"),
+            "joy": ("happy", "excited", "开心", "高兴"),
+        }
+        for candidate, tokens in emotion_keywords.items():
+            if any(token in normalized for token in tokens):
+                emotion_class = candidate
+                break
+
+        high_intensity_tokens = (
+            "extremely",
+            "severely",
+            "completely",
+            "totally",
+            "really bad",
+            "struggling",
+            "马上",
+            "立刻",
+            "完全",
+            "崩溃",
+            "撑不住",
+        )
+        medium_intensity_tokens = ("very", "pretty", "really", "很", "特别", "非常")
+        if any(token in normalized for token in high_intensity_tokens):
+            intensity = "high"
+        elif any(token in normalized for token in medium_intensity_tokens) or emotion_class != "neutral":
+            intensity = "medium"
+
+        if any(token in normalized for token in ("for months", "for weeks", "一直", "长期", "最近一直", "ongoing")):
+            duration_hint = "ongoing"
+        elif any(token in normalized for token in ("recently", "these days", "最近", "这几天")):
+            duration_hint = "recent"
+        elif any(token in normalized for token in ("right now", "today", "现在", "刚刚")):
+            duration_hint = "momentary"
+
+        return EmotionalInterpretation(
+            emotion_class=emotion_class,
+            intensity=intensity,
+            duration_hint=duration_hint,
+            support_preference=support_preference,
+            support_mode="safety_constrained" if emotional_risk in {"medium", "high"} else "blended",
+            emotional_risk=emotional_risk,
+        )
+
+    @classmethod
+    def _build_support_policy(
+        cls,
+        text: str,
+        core_memory: CoreMemory,
+        emotional_context: EmotionalInterpretation,
+    ) -> SupportPolicyDecision:
+        normalized = text.lower()
+        stored_preference = cls._resolve_stored_support_preference(core_memory.world_model)
+        explicit_preference = cls._detect_explicit_support_preference(normalized)
+
+        if emotional_context.emotional_risk in {"medium", "high"}:
+            return SupportPolicyDecision(
+                support_mode="safety_constrained",
+                inferred_preference=explicit_preference if explicit_preference != "unknown" else stored_preference,
+                stored_preference=stored_preference,
+                rationale="Emotional risk elevated; keep the response supportive, bounded, and safety-aware.",
+            )
+        if explicit_preference == "listening":
+            return SupportPolicyDecision(
+                support_mode="listening",
+                inferred_preference="listening",
+                stored_preference=stored_preference,
+                rationale="The user explicitly asked for listening-first support.",
+            )
+        if explicit_preference == "problem_solving":
+            return SupportPolicyDecision(
+                support_mode="problem_solving",
+                inferred_preference="problem_solving",
+                stored_preference=stored_preference,
+                rationale="The user explicitly asked for actionable help.",
+            )
+        if stored_preference == "listening":
+            return SupportPolicyDecision(
+                support_mode="listening",
+                inferred_preference="listening",
+                stored_preference=stored_preference,
+                rationale="Stored support preference suggests listening-first support unless the user asks otherwise.",
+            )
+        if stored_preference == "problem_solving":
+            return SupportPolicyDecision(
+                support_mode="problem_solving",
+                inferred_preference="problem_solving",
+                stored_preference=stored_preference,
+                rationale="Stored support preference suggests concise actionable help unless the user asks otherwise.",
+            )
+        if emotional_context.emotion_class in {"sadness", "anxiety", "loneliness", "overwhelm"}:
+            return SupportPolicyDecision(
+                support_mode="listening",
+                inferred_preference="unknown",
+                stored_preference=stored_preference,
+                rationale="The message is emotionally loaded and does not explicitly request solutions.",
+            )
+        return SupportPolicyDecision(
+            support_mode="blended",
+            inferred_preference="unknown",
+            stored_preference=stored_preference,
+            rationale="No strong support preference signal; acknowledge first, then keep suggestions light.",
+        )
+
+    @staticmethod
+    def _resolve_stored_support_preference(world_model: WorldModel) -> str:
+        for entry in world_model.confirmed_facts + world_model.inferred_memories:
+            if not str(getattr(entry, "memory_key", "")).startswith("support_preference:"):
+                continue
+            _, _, preference = str(entry.memory_key).partition(":")
+            if preference in {"listening", "problem_solving", "mixed"}:
+                return preference
+        return "unknown"
+
+    @staticmethod
+    def _detect_explicit_support_preference(text: str) -> str:
+        listening_tokens = (
+            "just listen",
+            "listen first",
+            "don't give advice",
+            "do not give advice",
+            "先听我说",
+            "别急着给建议",
+            "不要急着给建议",
+            "先陪我聊聊",
+        )
+        problem_tokens = (
+            "help me solve",
+            "tell me what to do",
+            "give me steps",
+            "what should i do",
+            "直接告诉我怎么做",
+            "给我步骤",
+            "帮我解决",
+            "告诉我该怎么做",
+        )
+        if any(token in text for token in listening_tokens):
+            return "listening"
+        if any(token in text for token in problem_tokens):
+            return "problem_solving"
+        return "unknown"
+
+    @staticmethod
+    def _emotional_risk(text: str) -> str:
+        high_risk_tokens = (
+            "kill myself",
+            "suicide",
+            "end my life",
+            "hurt myself",
+            "self harm",
+            "kill them",
+            "hurt someone",
+            "撑不住了",
+            "不想活了",
+            "想自杀",
+            "伤害自己",
+            "伤害别人",
+            "马上要出事",
+        )
+        medium_risk_tokens = (
+            "can't go on",
+            "falling apart",
+            "i'm breaking down",
+            "i feel unsafe",
+            "崩溃边缘",
+            "快不行了",
+            "活不下去",
+        )
+        if any(token in text for token in high_risk_tokens):
+            return "high"
+        if any(token in text for token in medium_risk_tokens):
+            return "medium"
+        return "low"
+
+    @staticmethod
+    def _high_risk_emotional_action(
+        message: InboundMessage,
+        emotional_context: EmotionalInterpretation,
+    ) -> Action:
+        content = (
+            "I'm sorry you're carrying this much right now. "
+            "If there's any immediate risk of you hurting yourself or someone else, contact local emergency help now "
+            "or reach out to a trusted person who can be with you in real life right away. "
+            "If you can, move toward real-world support immediately instead of handling this alone."
+        )
+        return Action(
+            type="direct_reply",
+            content=content,
+            inner_thoughts="High-risk emotional signal detected. Bypass task/tool actions and return a constrained safety-oriented reply.",
+            metadata={
+                "emotional_risk": emotional_context.emotional_risk,
+                "support_mode": "safety_constrained",
+                "emotion_class": emotional_context.emotion_class,
+            },
         )
 
     @staticmethod

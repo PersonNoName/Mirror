@@ -23,12 +23,20 @@ from app.evolution import (
     MetaCognitionReflector,
     ObserverEngine,
     PersonalityEvolver,
+    RelationshipStateMachine,
     RedisStreamsEventBus,
     SignalExtractor,
 )
 from app.hooks import hook_registry
 from app.infra import OutboxStore
-from app.memory import CoreMemoryCache, CoreMemoryStore, GraphStore, SessionContextStore, VectorRetriever
+from app.memory import (
+    CoreMemoryCache,
+    CoreMemoryStore,
+    GraphStore,
+    MemoryGovernanceService,
+    SessionContextStore,
+    VectorRetriever,
+)
 from app.platform.web import WebPlatformAdapter
 from app.providers import ModelProviderRegistry, build_routing_from_settings
 from app.skills import SkillLoader
@@ -78,6 +86,8 @@ class RuntimeContext:
     core_memory_scheduler: CoreMemoryScheduler
     evolution_journal: EvolutionJournal
     evolution_candidate_manager: EvolutionCandidateManager | None
+    relationship_state_machine: RelationshipStateMachine | None
+    memory_governance_service: MemoryGovernanceService
     personality_evolver: PersonalityEvolver
     observer: ObserverEngine
     reflector: MetaCognitionReflector
@@ -162,6 +172,21 @@ class RuntimeContext:
                 "recent_reverted_count": 0,
                 "degraded": True,
                 "status": "degraded",
+            },
+            "relationship_stage": {
+                "relationship_stage_enabled": self.relationship_state_machine is not None,
+                "relationship_stage_degraded": self.relationship_state_machine is None
+                or self.relationship_state_machine.degraded,
+                "status": (
+                    "degraded"
+                    if self.relationship_state_machine is None or self.relationship_state_machine.degraded
+                    else "ok"
+                ),
+            },
+            "memory_governance": {
+                "memory_governance_enabled": self.memory_governance_service is not None,
+                "memory_governance_degraded": self.memory_governance_service.degraded,
+                "status": "degraded" if self.memory_governance_service.degraded else "ok",
             },
         }
         if "status" not in subsystems["evolution_pipeline"]:
@@ -258,13 +283,22 @@ async def bootstrap_runtime() -> RuntimeContext:
 
     web_platform = WebPlatformAdapter()
     circuit_breaker = AsyncCircuitBreaker()
+    memory_governance_service = MemoryGovernanceService(
+        core_memory_cache=core_memory_cache,
+        core_memory_scheduler=None,
+        graph_store=graph_store,
+        candidate_manager=evolution_candidate_manager,
+        evolution_journal=evolution_journal,
+    )
     core_memory_scheduler = CoreMemoryScheduler(
         core_memory_store=core_memory_store,
         core_memory_cache=core_memory_cache,
         graph_store=graph_store,
         model_registry=model_registry,
+        memory_governance_service=memory_governance_service,
         circuit_breaker=circuit_breaker,
     )
+    memory_governance_service.core_memory_scheduler = core_memory_scheduler
     snapshot_store = PersonalitySnapshotStore()
     personality_evolver = PersonalityEvolver(
         session_context_store=session_context_store,
@@ -276,7 +310,18 @@ async def bootstrap_runtime() -> RuntimeContext:
         task_store=task_store,
         blackboard=blackboard,
     )
-    signal_extractor = SignalExtractor(personality_evolver=personality_evolver)
+    relationship_state_machine = (
+        RelationshipStateMachine(
+            core_memory_cache=core_memory_cache,
+            core_memory_scheduler=core_memory_scheduler,
+            candidate_manager=evolution_candidate_manager,
+            evolution_journal=evolution_journal,
+            personality_evolver=personality_evolver,
+        )
+        if evolution_candidate_manager is not None
+        else None
+    )
+    signal_extractor = SignalExtractor(personality_evolver=personality_evolver, event_bus=event_bus)
     observer = ObserverEngine(
         model_registry=model_registry,
         graph_store=graph_store,
@@ -297,6 +342,8 @@ async def bootstrap_runtime() -> RuntimeContext:
         task_store=task_store,
         blackboard=blackboard,
         candidate_manager=evolution_candidate_manager,
+        relationship_state_machine=relationship_state_machine,
+        memory_governance_service=memory_governance_service,
     )
     scheduler = EvolutionScheduler(
         core_memory_scheduler=core_memory_scheduler,
@@ -384,6 +431,8 @@ async def bootstrap_runtime() -> RuntimeContext:
         core_memory_scheduler=core_memory_scheduler,
         evolution_journal=evolution_journal,
         evolution_candidate_manager=evolution_candidate_manager,
+        relationship_state_machine=relationship_state_machine,
+        memory_governance_service=memory_governance_service,
         personality_evolver=personality_evolver,
         observer=observer,
         reflector=reflector,

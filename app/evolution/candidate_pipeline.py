@@ -145,6 +145,22 @@ class EvolutionCandidateManager:
     def get_candidate(self, candidate_id: str) -> EvolutionCandidate | None:
         return self._candidates_by_id.get(candidate_id)
 
+    def list_candidates(
+        self,
+        *,
+        user_id: str | None = None,
+        affected_area: EvolutionAffectedArea | None = None,
+        statuses: set[EvolutionCandidateStatus] | None = None,
+    ) -> list[EvolutionCandidate]:
+        items = list(self._candidates_by_id.values())
+        if user_id is not None:
+            items = [item for item in items if item.user_id == user_id]
+        if affected_area is not None:
+            items = [item for item in items if item.affected_area == affected_area]
+        if statuses is not None:
+            items = [item for item in items if item.status in statuses]
+        return list(items)
+
     async def mark_applied(self, candidate_id: str) -> EvolutionCandidate | None:
         candidate = self._candidates_by_id.get(candidate_id)
         if candidate is None:
@@ -262,6 +278,9 @@ class EvolutionCandidateManager:
                     "dedupe_key": candidate.dedupe_key,
                     "proposed_change": dict(candidate.proposed_change),
                     "rollback_reason": candidate.metadata.get("rollback_reason"),
+                    "relationship_stage_from": candidate.metadata.get("relationship_stage_from"),
+                    "relationship_stage_to": candidate.metadata.get("relationship_stage_to"),
+                    "transition_reason": candidate.metadata.get("transition_reason"),
                 },
             )
         )

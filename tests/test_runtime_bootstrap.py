@@ -86,9 +86,16 @@ class StubPersonalityEvolver:
         self.kwargs = kwargs
 
 
+class StubRelationshipStateMachine:
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+        self.degraded = False
+
+
 class StubSignalExtractor:
-    def __init__(self, personality_evolver: object) -> None:
+    def __init__(self, personality_evolver: object, event_bus: object | None = None) -> None:
         self.personality_evolver = personality_evolver
+        self.event_bus = event_bus
 
     async def handle_dialogue_ended(self, event: object) -> None:
         return None
@@ -219,6 +226,7 @@ async def test_bootstrap_runtime_survives_degraded_dependencies(monkeypatch: pyt
     monkeypatch.setattr(bootstrap_module, "CoreMemoryScheduler", StubCoreMemoryScheduler)
     monkeypatch.setattr(bootstrap_module, "PersonalitySnapshotStore", StubSnapshotStore)
     monkeypatch.setattr(bootstrap_module, "PersonalityEvolver", StubPersonalityEvolver)
+    monkeypatch.setattr(bootstrap_module, "RelationshipStateMachine", StubRelationshipStateMachine)
     monkeypatch.setattr(bootstrap_module, "SignalExtractor", StubSignalExtractor)
     monkeypatch.setattr(bootstrap_module, "ObserverEngine", StubObserver)
     monkeypatch.setattr(bootstrap_module, "MetaCognitionReflector", StubReflector)
@@ -259,3 +267,6 @@ async def test_bootstrap_runtime_survives_degraded_dependencies(monkeypatch: pyt
     assert health["subsystems"]["qdrant"]["status"] == "degraded"
     assert health["subsystems"]["evolution_pipeline"]["status"] == "ok"
     assert health["subsystems"]["evolution_pipeline"]["pending_candidate_count"] == 0
+    assert health["subsystems"]["relationship_stage"]["status"] == "ok"
+    assert health["subsystems"]["relationship_stage"]["relationship_stage_enabled"] is True
+    assert health["subsystems"]["memory_governance"]["status"] == "ok"

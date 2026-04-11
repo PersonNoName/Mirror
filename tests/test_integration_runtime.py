@@ -12,6 +12,7 @@ from app.agents.registry import AgentRegistry
 from app.api.chat import router as chat_router
 from app.api.hitl import router as hitl_router
 from app.api.journal import router as journal_router
+from app.api.memory import router as memory_router
 from app.evolution.event_bus import Event, EventType
 from app.infra.outbox import OutboxEvent
 from app.memory import CoreMemory
@@ -123,6 +124,7 @@ def build_runtime_app(
     app.include_router(chat_router)
     app.include_router(hitl_router)
     app.include_router(journal_router)
+    app.include_router(memory_router)
 
     core_memory_cache = IntegrationCoreMemoryCache()
     session_store = session_context_store or IntegrationSessionContextStore()
@@ -173,6 +175,13 @@ def build_runtime_app(
     app.state.event_bus = event_bus
     app.state.event_bus_event_factory = lambda event_type, payload: Event(type=event_type, payload=payload)
     app.state.evolution_journal = SimpleNamespace(list_recent=_list_recent_empty)
+    app.state.memory_governance_service = SimpleNamespace(
+        list_memory=_list_memory_empty,
+        get_policy=_get_policy_default,
+        set_blocked=_set_blocked_default,
+        correct_memory=_correct_memory_default,
+        delete_memory=_delete_memory_default,
+    )
     app.state.streaming_disabled = streaming_disabled
 
     runtime = {
@@ -192,6 +201,45 @@ def build_runtime_app(
 
 async def _list_recent_empty(limit: int = 20, user_id: str | None = None) -> list[Any]:
     return []
+
+
+async def _list_memory_empty(*, user_id: str, include_candidates: bool = True, include_superseded: bool = False) -> list[Any]:
+    return []
+
+
+async def _get_policy_default(user_id: str) -> Any:
+    return SimpleNamespace(
+        blocked_content_classes=[],
+        retention_days={"fact": 0, "relationship": 0, "inference": 30, "pending_confirmation": 7, "memory_conflicts": 30, "candidate": 7},
+        updated_at="2026-04-11T10:00:00+00:00",
+    )
+
+
+async def _set_blocked_default(*, user_id: str, content_class: str, blocked: bool) -> Any:
+    classes = [content_class] if blocked else []
+    return SimpleNamespace(
+        blocked_content_classes=classes,
+        retention_days={"fact": 0, "relationship": 0, "inference": 30, "pending_confirmation": 7, "memory_conflicts": 30, "candidate": 7},
+        updated_at="2026-04-11T10:00:00+00:00",
+    )
+
+
+async def _correct_memory_default(**kwargs: Any) -> Any:
+    return {
+        "memory_key": kwargs["memory_key"],
+        "content": kwargs["corrected_content"],
+        "truth_type": kwargs["truth_type"],
+        "status": "active",
+        "source": "user_correction",
+        "confidence": 1.0,
+        "confirmed_by_user": True,
+        "updated_at": "2026-04-11T10:00:00+00:00",
+        "visibility": "durable",
+    }
+
+
+async def _delete_memory_default(*, user_id: str, memory_key: str, reason: str) -> None:
+    return None
 
 
 def _chat_payload(content: str) -> dict[str, Any]:
@@ -359,6 +407,28 @@ def test_integration_degraded_streaming_unavailable_but_chat_safe() -> None:
             "details": {"session_id": "session-1"},
         }
     }
+
+
+def test_integration_high_risk_emotional_message_bypasses_publish_task() -> None:
+    app, runtime = build_runtime_app(
+        chat_response=(
+            "<inner_thoughts>delegate</inner_thoughts>"
+            "<action>publish_task</action>"
+            "<content>dangerous task</content>"
+        ),
+        agent_capability=0.99,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/chat",
+            json={"text": "I want to kill myself right now", "session_id": "session-1", "user_id": "user-1"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    assert "immediate risk" in response.json()["reply"]
+    assert runtime["outbox_store"].events == []
 
 
 async def _async_noop_message(user_id: str, session_id: str, message: dict[str, Any]) -> None:

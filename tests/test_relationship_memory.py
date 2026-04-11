@@ -82,6 +82,34 @@ async def test_core_memory_store_reads_legacy_world_model_into_structured_facts(
     assert len(core_memory.world_model.confirmed_facts) == 3
     assert core_memory.world_model.confirmed_facts[0].source == "legacy_snapshot"
     assert core_memory.world_model.confirmed_facts[0].confirmed_by_user is True
+    assert core_memory.world_model.relationship_stage.stage == "unfamiliar"
+    assert core_memory.world_model.relationship_stage.confidence == 0.0
+
+
+@pytest.mark.asyncio
+async def test_core_memory_store_round_trips_relationship_stage_snapshot() -> None:
+    snapshot = {
+        "world_model": {
+            "relationship_stage": {
+                "stage": "stable_companion",
+                "confidence": 0.88,
+                "updated_at": "2026-04-11T00:00:00+00:00",
+                "entered_at": "2026-04-10T00:00:00+00:00",
+                "supports_vulnerability": True,
+                "repair_needed": False,
+                "recent_transition_reason": "Stable relationship evidence accumulated.",
+                "recent_shared_events": ["User shared a long-running project update."],
+            }
+        }
+    }
+
+    core_memory = _core_memory_from_dict(snapshot)
+
+    assert core_memory.world_model.relationship_stage.stage == "stable_companion"
+    assert core_memory.world_model.relationship_stage.supports_vulnerability is True
+    assert core_memory.world_model.relationship_stage.recent_shared_events == [
+        "User shared a long-running project update."
+    ]
 
 
 @pytest.mark.asyncio
@@ -310,3 +338,47 @@ async def test_hitl_feedback_promotes_pending_memory_after_approval() -> None:
     assert not core_memory.world_model.pending_confirmations
     assert core_memory.world_model.inferred_memories[0].confirmed_by_user is True
     assert task_store.tasks[task.id].status == "done"
+
+
+@pytest.mark.asyncio
+async def test_support_preference_lesson_uses_stable_support_memory_key() -> None:
+    core_memory = CoreMemory()
+    scheduler = RecordingScheduler(core_memory)
+    candidate_manager = EvolutionCandidateManager(EvolutionJournal())
+    updater = CognitionUpdater(
+        core_memory_cache=DummyCoreMemoryCache(core_memory),
+        core_memory_scheduler=scheduler,
+        graph_store=RecordingGraphStore(),
+        candidate_manager=candidate_manager,
+    )
+    lesson = Lesson(
+        user_id="user-1",
+        domain="support_preference",
+        summary="User prefers listening-first support when emotionally loaded.",
+        confidence=0.95,
+        details={
+            "support_preference": "listening",
+            "explicit_user_statement": True,
+            "explicit_user_confirmation": True,
+            "session_id": "session-a",
+        },
+    )
+
+    await updater._update_world_model(lesson)
+    await updater._update_world_model(
+        Lesson(
+            user_id="user-1",
+            domain="support_preference",
+            summary="User prefers listening-first support when emotionally loaded.",
+            confidence=0.95,
+            details={
+                "support_preference": "listening",
+                "explicit_user_statement": True,
+                "explicit_user_confirmation": True,
+                "session_id": "session-b",
+            },
+        )
+    )
+
+    assert scheduler.calls
+    assert core_memory.world_model.confirmed_facts[0].memory_key == "support_preference:listening"

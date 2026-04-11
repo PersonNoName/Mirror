@@ -17,8 +17,10 @@ from app.memory.core_memory import (
     DurableMemory,
     FactualMemory,
     InferredMemory,
+    MemoryGovernancePolicy,
     MemoryEntry,
     PersonalityState,
+    RelationshipStageState,
     RelationshipStyle,
     RelationshipMemory,
     SessionAdaptation,
@@ -130,6 +132,19 @@ def _relationship_style_from_dict(data: dict[str, Any]) -> RelationshipStyle:
     )
 
 
+def _relationship_stage_from_dict(data: dict[str, Any]) -> RelationshipStageState:
+    return RelationshipStageState(
+        stage=str(data.get("stage", "unfamiliar")),
+        confidence=float(data.get("confidence", 0.0)),
+        updated_at=str(data.get("updated_at", "")),
+        entered_at=str(data.get("entered_at", "")),
+        supports_vulnerability=bool(data.get("supports_vulnerability", False)),
+        repair_needed=bool(data.get("repair_needed", False)),
+        recent_transition_reason=str(data.get("recent_transition_reason", "")),
+        recent_shared_events=list(data.get("recent_shared_events", [])),
+    )
+
+
 def _session_adaptation_from_dict(data: dict[str, Any]) -> SessionAdaptation:
     return SessionAdaptation(
         current_items=list(data.get("current_items", [])),
@@ -137,6 +152,22 @@ def _session_adaptation_from_dict(data: dict[str, Any]) -> SessionAdaptation:
         created_at=str(data.get("created_at", "")),
         expires_at=str(data.get("expires_at", "")),
         max_items=int(data.get("max_items", 5)),
+    )
+
+
+def _memory_governance_from_dict(data: dict[str, Any]) -> MemoryGovernancePolicy:
+    policy = MemoryGovernancePolicy()
+    retention = dict(policy.retention_days)
+    retention.update(
+        {
+            key: int(value)
+            for key, value in dict(data.get("retention_days", {})).items()
+        }
+    )
+    return MemoryGovernancePolicy(
+        blocked_content_classes=list(data.get("blocked_content_classes", [])),
+        retention_days=retention,
+        updated_at=str(data.get("updated_at", "")) or policy.updated_at,
     )
 
 
@@ -219,6 +250,12 @@ def _core_memory_from_dict(data: dict[str, Any]) -> CoreMemory:
                 _relationship_memory_from_dict(item)
                 for item in list(world_model.get("relationship_history", []))
             ],
+            relationship_stage=_relationship_stage_from_dict(
+                dict(world_model.get("relationship_stage", {}))
+            ),
+            memory_governance=_memory_governance_from_dict(
+                dict(world_model.get("memory_governance", {}))
+            ),
             pending_confirmations=[
                 _durable_memory_from_dict(item)
                 for item in list(world_model.get("pending_confirmations", []))

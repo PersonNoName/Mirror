@@ -9,9 +9,12 @@ from app.memory.core_memory import (
     CoreMemory,
     DurableMemory,
     FactualMemory,
+    GovernanceContentClass,
     InferredMemory,
+    MemoryGovernancePolicy,
     MemoryEntry,
     PersonalityState,
+    RelationshipStageState,
     RelationshipStyle,
     RelationshipMemory,
     SessionAdaptation,
@@ -20,6 +23,7 @@ from app.memory.core_memory import (
     WorldModel,
 )
 from app.memory.core_memory_store import CoreMemoryStore
+from app.memory.governance import MemoryGovernanceService
 from app.memory.graph_store import GraphStore
 from app.memory.session_context import SessionContextStore
 from app.memory.vector_retriever import VectorRetriever
@@ -34,10 +38,14 @@ __all__ = [
     "CoreMemoryStore",
     "DurableMemory",
     "FactualMemory",
+    "GovernanceContentClass",
     "GraphStore",
     "InferredMemory",
+    "MemoryGovernancePolicy",
+    "MemoryGovernanceService",
     "MemoryEntry",
     "PersonalityState",
+    "RelationshipStageState",
     "RelationshipStyle",
     "RelationshipMemory",
     "SessionAdaptation",

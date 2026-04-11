@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from app.api import chat_router, hitl_router, journal_router
+from app.api import chat_router, hitl_router, journal_router, memory_router
 from app.config import settings
 from app.logging import configure_logging
 from app.runtime import runtime_lifespan
@@ -16,6 +16,7 @@ app = FastAPI(title=settings.app.name, lifespan=runtime_lifespan)
 app.include_router(chat_router)
 app.include_router(hitl_router)
 app.include_router(journal_router)
+app.include_router(memory_router)
 
 
 @app.get("/health")

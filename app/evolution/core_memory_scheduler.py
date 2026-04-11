@@ -14,6 +14,8 @@ from app.memory.core_memory import (
     FactualMemory,
     InferredMemory,
     MemoryEntry,
+    MemoryGovernancePolicy,
+    RelationshipStageState,
     RelationshipMemory,
     WorldModel,
 )
@@ -39,12 +41,14 @@ class CoreMemoryScheduler:
         core_memory_cache: Any,
         graph_store: Any | None,
         model_registry: Any,
+        memory_governance_service: Any | None = None,
         circuit_breaker: Any | None = None,
     ) -> None:
         self.core_memory_store = core_memory_store
         self.core_memory_cache = core_memory_cache
         self.graph_store = graph_store
         self.model_registry = model_registry
+        self.memory_governance_service = memory_governance_service
         self.circuit_breaker = circuit_breaker
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -53,6 +57,11 @@ class CoreMemoryScheduler:
             current = deepcopy(await self.core_memory_cache.get(user_id))
             if block == "world_model":
                 base_world_model = content if isinstance(content, WorldModel) else current.world_model
+                if self.memory_governance_service is not None:
+                    base_world_model = await self.memory_governance_service.prune_and_record(
+                        user_id=user_id,
+                        world_model=base_world_model,
+                    )
                 setattr(current, block, await self.rebuild_world_model_snapshot(user_id, base_world_model))
             else:
                 setattr(current, block, content)
@@ -187,6 +196,12 @@ class CoreMemoryScheduler:
                     self._coerce_relationship_item(item)
                     for item in compressed.get("relationship_history", [])
                 ],
+                relationship_stage=self._coerce_relationship_stage(
+                    dict(compressed.get("relationship_stage", {}))
+                ),
+                memory_governance=self._coerce_memory_governance(
+                    dict(compressed.get("memory_governance", {}))
+                ),
                 pending_confirmations=[
                     self._coerce_durable_item(item)
                     for item in compressed.get("pending_confirmations", [])
@@ -236,6 +251,8 @@ class CoreMemoryScheduler:
                 ),
             )
             setattr(clone, attr, prioritized[:4])
+        if hasattr(clone, "relationship_stage") and len(clone.relationship_stage.recent_shared_events) > 3:
+            clone.relationship_stage.recent_shared_events = list(clone.relationship_stage.recent_shared_events)[:3]
         for attr in ("domain_tips", "agent_habits"):
             if hasattr(clone, attr):
                 mapping = dict(getattr(clone, attr))
@@ -285,6 +302,30 @@ class CoreMemoryScheduler:
             subject=str(data.get("subject", "")),
             relation=str(data.get("relation", "")),
             object=str(data.get("object", "")),
+        )
+
+    @staticmethod
+    def _coerce_relationship_stage(data: dict[str, Any]) -> RelationshipStageState:
+        return RelationshipStageState(
+            stage=str(data.get("stage", "unfamiliar")),
+            confidence=float(data.get("confidence", 0.0)),
+            updated_at=str(data.get("updated_at", "")),
+            entered_at=str(data.get("entered_at", "")),
+            supports_vulnerability=bool(data.get("supports_vulnerability", False)),
+            repair_needed=bool(data.get("repair_needed", False)),
+            recent_transition_reason=str(data.get("recent_transition_reason", "")),
+            recent_shared_events=list(data.get("recent_shared_events", [])),
+        )
+
+    @staticmethod
+    def _coerce_memory_governance(data: dict[str, Any]) -> MemoryGovernancePolicy:
+        policy = MemoryGovernancePolicy()
+        retention = dict(policy.retention_days)
+        retention.update({key: int(value) for key, value in dict(data.get("retention_days", {})).items()})
+        return MemoryGovernancePolicy(
+            blocked_content_classes=list(data.get("blocked_content_classes", [])),
+            retention_days=retention,
+            updated_at=str(data.get("updated_at", "")) or policy.updated_at,
         )
 
     @staticmethod
