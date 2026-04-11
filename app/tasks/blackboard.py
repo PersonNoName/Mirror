@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
+
+import structlog
 
 from app.evolution.event_bus import Event, EventType
 from app.tasks.models import Task
+
+
+logger = structlog.get_logger(__name__)
 
 
 class Blackboard:
@@ -32,6 +36,14 @@ class Blackboard:
         task.status = "running"
         await self.task_store.update(task)
         await self.task_system.publish_dispatch(task)
+        logger.info(
+            "task_assigned",
+            task_id=task.id,
+            assigned_to=task.assigned_to,
+            dispatch_stream=task.dispatch_stream,
+            consumer_group=task.consumer_group,
+            priority=task.priority,
+        )
 
     async def on_task_waiting_hitl(self, task: Task, request: Any) -> None:
         task.status = "waiting_hitl"
@@ -68,12 +80,12 @@ class Blackboard:
             Event(type=EventType.TASK_COMPLETED, payload={"task_id": task.id, "result": result or {}})
         )
 
-    async def on_task_failed(self, task: Task, error: str) -> None:
-        task.status = "failed"
+    async def on_task_failed(self, task: Task, error: str, status: str = "failed") -> None:
+        task.status = status
         task.error_trace = error
         await self.task_store.update(task)
         await self.event_bus.emit(
-            Event(type=EventType.TASK_FAILED, payload={"task_id": task.id, "error": error})
+            Event(type=EventType.TASK_FAILED, payload={"task_id": task.id, "error": error, "status": status})
         )
 
     async def terminate_agent(self, agent_name: str) -> None:

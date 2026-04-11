@@ -5,11 +5,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import structlog
+
 from app.evolution.event_bus import Event, EventType
 from app.hooks import HookPoint
 from app.platform.base import HitlRequest, InboundMessage, OutboundMessage
-from app.tools import ToolInvocationError
 from app.soul.models import Action
+from app.tools import ToolInvocationError
+
+
+logger = structlog.get_logger(__name__)
 
 
 class ActionRouter:
@@ -68,8 +73,11 @@ class ActionRouter:
             if not best_agent or cap_score < 0.3:
                 request = HitlRequest(
                     task_id=task.id,
-                    title="需要用户确认",
-                    description=f"当前工具无法稳妥完成此任务（置信度 {cap_score:.2f}）。",
+                    title="User confirmation required",
+                    description=(
+                        "No available agent can reliably complete this task. "
+                        f"Capability score={cap_score:.2f}."
+                    ),
                 )
                 await self.blackboard.on_task_waiting_hitl(task, request)
                 await self.platform_adapter.send_hitl(ctx, request)
@@ -95,8 +103,8 @@ class ActionRouter:
             if cap_score < 0.5:
                 await self.blackboard.assign(task)
                 message = (
-                    f"正在尝试处理，但置信度偏低（{cap_score:.2f}），"
-                    "结果可能需要你确认。"
+                    "Task dispatch started, but the selected agent has low confidence "
+                    f"(score={cap_score:.2f}). The result may need review."
                 )
                 await self.platform_adapter.send_outbound(
                     ctx,
@@ -118,7 +126,7 @@ class ActionRouter:
                 }
 
             await self.blackboard.assign(task)
-            message = "任务已派发，等待异步处理。"
+            message = "Task dispatched. Waiting for asynchronous execution."
             await self.platform_adapter.send_outbound(ctx, OutboundMessage(type="text", content=message))
             if self.hook_registry is not None:
                 await self.hook_registry.trigger(
@@ -138,7 +146,7 @@ class ActionRouter:
         if action.type == "hitl_relay":
             request = HitlRequest(
                 task_id=str(action.metadata.get("task_id", "")),
-                title="等待确认",
+                title="Waiting for confirmation",
                 description=str(action.content),
             )
             await self.platform_adapter.send_hitl(ctx, request)
@@ -179,7 +187,7 @@ class ActionRouter:
         try:
             payload = self._parse_tool_payload(action.content)
         except ValueError as exc:
-            return f"工具调用解析失败，已降级为直接回复：{exc}"
+            return f"Tool call payload could not be parsed. Falling back to direct reply: {exc}"
 
         tool_name = payload["name"]
         params = payload.get("arguments", {})
@@ -191,9 +199,20 @@ class ActionRouter:
         try:
             result = await self.tool_registry.invoke(tool_name, params, context=context)
         except KeyError:
-            return f"工具 `{tool_name}` 未注册，已降级为直接回复。"
+            logger.warning(
+                "tool_invocation_failed",
+                tool_name=tool_name,
+                reason="not_registered",
+            )
+            return f"Tool `{tool_name}` is not registered. Falling back to direct reply."
         except ToolInvocationError as exc:
-            return f"工具 `{tool_name}` 调用失败：{exc}"
+            logger.warning(
+                "tool_invocation_failed",
+                tool_name=tool_name,
+                reason="invocation_error",
+                error=str(exc),
+            )
+            return f"Tool `{tool_name}` failed: {exc}"
 
         if isinstance(result, str):
             return result
@@ -208,14 +227,14 @@ class ActionRouter:
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError as exc:
-                raise ValueError("tool_call content 必须是 JSON 对象。") from exc
+                raise ValueError("tool_call content must be a JSON object.") from exc
         else:
-            raise ValueError("tool_call content 类型无效。")
+            raise ValueError("tool_call content has an invalid type.")
 
         name = str(payload.get("name", "")).strip()
         if not name:
-            raise ValueError("缺少工具名。")
+            raise ValueError("tool_call content is missing a tool name.")
         arguments = payload.get("arguments", {})
         if not isinstance(arguments, dict):
-            raise ValueError("工具 arguments 必须是对象。")
+            raise ValueError("tool_call arguments must be an object.")
         return {"name": name, "arguments": arguments}

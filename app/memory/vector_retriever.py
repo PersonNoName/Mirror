@@ -52,6 +52,9 @@ class VectorRetriever:
         content: str,
         metadata: dict[str, Any] | None = None,
         is_pinned: bool = False,
+        truth_type: str = "fact",
+        status: str = "active",
+        confirmed_by_user: bool = False,
     ) -> str:
         self._validate_namespace(namespace)
         vector = (await self.model_registry.embedding("retrieval.embedding").embed([content]))[0]
@@ -64,6 +67,9 @@ class VectorRetriever:
             "content": content,
             "content_hash": content_hash,
             "is_pinned": is_pinned,
+            "truth_type": truth_type,
+            "status": status,
+            "confirmed_by_user": confirmed_by_user,
             "metadata": metadata or {},
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -160,6 +166,9 @@ class VectorRetriever:
             "namespace": payload.get("namespace", ""),
             "metadata": dict(payload.get("metadata", {})),
             "is_pinned": bool(payload.get("is_pinned", False)),
+            "truth_type": payload.get("truth_type", "fact"),
+            "status": payload.get("status", "active"),
+            "confirmed_by_user": bool(payload.get("confirmed_by_user", False)),
         }
 
     @staticmethod
@@ -167,16 +176,24 @@ class VectorRetriever:
         matches: list[dict[str, Any]],
         reranked: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        enriched: list[dict[str, Any]] = []
+        enriched: list[tuple[int, dict[str, Any]]] = []
+        seen_indices: set[int] = set()
         for position, item in enumerate(reranked):
             index = item.get("index", item.get("document_index", position))
             if not isinstance(index, int) or index < 0 or index >= len(matches):
+                continue
+            if index in seen_indices:
                 continue
             merged = dict(matches[index])
             merged["rerank_score"] = float(
                 item.get("score", item.get("relevance_score", merged["score"]))
             )
-            enriched.append(merged)
+            enriched.append((index, merged))
+            seen_indices.add(index)
         if not enriched:
             return matches
-        return sorted(enriched, key=lambda item: item.get("rerank_score", 0.0), reverse=True)
+        reranked_items = [
+            item for _, item in sorted(enriched, key=lambda pair: pair[1].get("rerank_score", 0.0), reverse=True)
+        ]
+        remaining = [dict(match) for idx, match in enumerate(matches) if idx not in seen_indices]
+        return reranked_items + remaining

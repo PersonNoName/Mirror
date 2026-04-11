@@ -17,11 +17,11 @@ from app.tasks.models import Task, TaskResult
 TASK_RESULT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "summary": {"type": "string", "description": "执行结果摘要"},
+        "summary": {"type": "string", "description": "Short execution summary."},
         "files_changed": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "改动的文件路径列表",
+            "description": "List of changed file paths.",
         },
         "success": {"type": "boolean"},
         "error_type": {"type": "string", "enum": ["RETRYABLE", "FATAL", "NONE"]},
@@ -55,9 +55,53 @@ class CodeAgent(SubAgent):
     async def estimate_capability(self, task: Task) -> float:
         text = f"{task.intent}\n{task.prompt_snapshot}".lower()
         score = 0.0
-        high = ["代码", "编程", "实现", "脚本", "debug", "调试", "重构", "python", "函数", "类", "run"]
-        medium = ["文件", "测试", "命令", "终端", "repo", "git"]
-        negative = ["搜索网页", "联网", "浏览器", "图像生成"]
+        high = [
+            "code",
+            "coding",
+            "implement",
+            "implementation",
+            "script",
+            "debug",
+            "bug",
+            "refactor",
+            "python",
+            "function",
+            "class",
+            "run",
+            "代码",
+            "编程",
+            "实现",
+            "脚本",
+            "调试",
+            "重构",
+            "函数",
+            "类",
+            "运行",
+        ]
+        medium = [
+            "file",
+            "files",
+            "test",
+            "tests",
+            "command",
+            "terminal",
+            "repo",
+            "git",
+            "文件",
+            "测试",
+            "命令",
+            "终端",
+            "仓库",
+        ]
+        negative = [
+            "search web",
+            "browser",
+            "image generation",
+            "联网",
+            "网页搜索",
+            "浏览器",
+            "图像生成",
+        ]
         for keyword in high:
             if keyword in text:
                 score += 0.18
@@ -99,7 +143,7 @@ class CodeAgent(SubAgent):
             hitl_result.get("decision", "reject"),
             hitl_result.get("payload", {}),
         )
-        return TaskResult(task_id=task.id, status="running", output={"summary": "permission response received"})
+        return TaskResult(task_id=task.id, status="running", output={"summary": "Permission response received."})
 
     async def _create_session(self, client: httpx.AsyncClient, task: Task) -> str:
         response = await client.post("/session", json={"title": f"task:{task.id}"})
@@ -169,8 +213,8 @@ class CodeAgent(SubAgent):
 
         request = HitlRequest(
             task_id=task.id,
-            title="需要权限确认",
-            description=f"任务请求高风险权限：{permission_type}",
+            title="Permission confirmation required",
+            description=f"Task requested a high-risk permission: {permission_type}",
             risk_level="high",
             metadata={
                 "permission_id": permission_id,
@@ -229,11 +273,11 @@ class CodeAgent(SubAgent):
             return
 
     def _build_prompt(self, task: Task) -> str:
-        return f"""任务意图：{task.intent}
+        return f"""Task intent: {task.intent}
 
-工作目录：{task.metadata.get("working_dir", ".")}
+Working directory: {task.metadata.get("working_dir", ".")}
 
-约束条件：
-{task.metadata.get("constraints", "无特殊约束")}
+Constraints: {task.metadata.get("constraints", "None")}
 
-请完成上述任务，并严格按 JSON Schema 返回结果。"""
+Complete the task and return the result strictly in the provided JSON schema.
+Prefer a concise summary and list every changed file path when applicable."""

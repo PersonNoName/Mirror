@@ -24,6 +24,9 @@ TaskStatus = Literal[
     "cancelled",
 ]
 
+MemoryConfirmationDecision = Literal["approve", "reject", "defer"]
+EvolutionCandidateDecision = Literal["approve", "reject", "defer"]
+
 
 @dataclass(slots=True)
 class TaskResult:
@@ -61,6 +64,33 @@ class Lesson:
 
 
 @dataclass(slots=True)
+class MemoryConfirmationRequest:
+    """Payload for confirming or rejecting a memory promotion."""
+
+    memory_key: str
+    candidate_content: str
+    truth_type: Literal["fact", "inference", "relationship"]
+    source: str
+    reason: str
+    options: list[MemoryConfirmationDecision] = field(default_factory=lambda: ["approve", "reject", "defer"])
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class EvolutionCandidateRequest:
+    """Payload for approving or rejecting a high-risk evolution candidate."""
+
+    candidate_id: str
+    affected_area: Literal["self_cognition", "world_model", "personality", "relationship_style"]
+    risk_level: Literal["low", "medium", "high"]
+    evidence_summary: str
+    proposed_change: dict[str, Any]
+    reason: str
+    options: list[EvolutionCandidateDecision] = field(default_factory=lambda: ["approve", "reject", "defer"])
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class Task:
     """Task entity shared across routing, execution, and reflection layers."""
 
@@ -86,4 +116,3 @@ class Task:
     delivery_token: str | None = None
     created_at: datetime = field(default_factory=utc_now)
     metadata: dict[str, Any] = field(default_factory=dict)
-

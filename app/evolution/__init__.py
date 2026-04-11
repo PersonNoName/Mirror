@@ -1,5 +1,14 @@
 """Evolution subsystem package."""
 
+from app.evolution.candidate_pipeline import (
+    EvolutionAffectedArea,
+    EvolutionCandidate,
+    EvolutionCandidateManager,
+    EvolutionCandidateStatus,
+    EvolutionPipelineAction,
+    EvolutionRiskLevel,
+    EvolutionSubmissionResult,
+)
 from app.evolution.cognition_updater import CognitionUpdater
 from app.evolution.core_memory_scheduler import CoreMemoryScheduler
 from app.evolution.event_bus import Event, EventBus, EventType, EvolutionEntry, InteractionSignal, RedisStreamsEventBus
@@ -17,8 +26,15 @@ __all__ = [
     "Event",
     "EventBus",
     "EventType",
+    "EvolutionAffectedArea",
+    "EvolutionCandidate",
+    "EvolutionCandidateManager",
     "EvolutionEntry",
     "EvolutionJournal",
+    "EvolutionCandidateStatus",
+    "EvolutionPipelineAction",
+    "EvolutionRiskLevel",
+    "EvolutionSubmissionResult",
     "InMemoryEventBus",
     "InteractionSignal",
     "MetaCognitionReflector",

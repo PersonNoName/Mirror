@@ -5,10 +5,22 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Literal
 
 
 CORE_MEMORY_INVALIDATION_CHANNEL = "core_memory:invalidate"
+
+TruthType = Literal["fact", "inference", "relationship"]
+TimeHorizon = Literal["short_term", "medium_term", "long_term"]
+MemoryStatus = Literal["active", "pending_confirmation", "conflicted", "superseded"]
+Sensitivity = Literal["normal", "sensitive"]
+
+
+def utc_now_iso() -> str:
+    """Return an ISO-8601 UTC timestamp."""
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass(slots=True)
@@ -17,6 +29,49 @@ class MemoryEntry:
 
     content: Any
     is_pinned: bool = False
+
+
+@dataclass(slots=True)
+class DurableMemory:
+    """Base durable memory item with truth and lifecycle metadata."""
+
+    content: str
+    source: str
+    confidence: float = 0.0
+    updated_at: str = field(default_factory=utc_now_iso)
+    confirmed_by_user: bool = False
+    is_pinned: bool = False
+    truth_type: TruthType = "fact"
+    time_horizon: TimeHorizon = "long_term"
+    status: MemoryStatus = "active"
+    sensitivity: Sensitivity = "normal"
+    memory_key: str = ""
+    conflict_with: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class FactualMemory(DurableMemory):
+    """User-confirmed or explicit factual memory."""
+
+    truth_type: TruthType = "fact"
+
+
+@dataclass(slots=True)
+class InferredMemory(DurableMemory):
+    """System-inferred memory that must remain separate from facts."""
+
+    truth_type: TruthType = "inference"
+
+
+@dataclass(slots=True)
+class RelationshipMemory(DurableMemory):
+    """Relationship-oriented memory with explicit graph semantics."""
+
+    subject: str = ""
+    relation: str = ""
+    object: str = ""
+    truth_type: TruthType = "relationship"
 
 
 @dataclass(slots=True)
@@ -44,6 +99,53 @@ class BehavioralRule:
 
 
 @dataclass(slots=True)
+class CorePersonality:
+    """Stable long-term identity state."""
+
+    baseline_description: str = ""
+    behavioral_rules: list[BehavioralRule] = field(default_factory=list)
+    traits_internal: dict[str, float] = field(
+        default_factory=lambda: {
+            "directness": 0.7,
+            "supportiveness": 0.6,
+            "conciseness": 0.7,
+        }
+    )
+    version: int = 1
+    updated_at: str = field(default_factory=utc_now_iso)
+    stable_fields: list[str] = field(
+        default_factory=lambda: [
+            "baseline_description",
+            "behavioral_rules",
+            "traits_internal",
+        ]
+    )
+
+
+@dataclass(slots=True)
+class RelationshipStyle:
+    """Long-term relational interaction style."""
+
+    warmth: float = 0.5
+    boundary_strength: float = 0.8
+    supportiveness: float = 0.6
+    humor: float = 0.3
+    preferred_closeness: str = "steady"
+    updated_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(slots=True)
+class SessionAdaptation:
+    """Short-term per-session adaptation state."""
+
+    current_items: list[str] = field(default_factory=list)
+    session_id: str = ""
+    created_at: str = field(default_factory=utc_now_iso)
+    expires_at: str = field(default_factory=utc_now_iso)
+    max_items: int = 5
+
+
+@dataclass(slots=True)
 class SelfCognition:
     """Persistent self-model maintained per user."""
 
@@ -56,22 +158,27 @@ class SelfCognition:
 
 @dataclass(slots=True)
 class WorldModel:
-    """Readonly worldview snapshot synthesized from durable stores."""
+    """Prompt-facing worldview snapshot partitioned by truth and status."""
 
-    env_constraints: list[MemoryEntry] = field(default_factory=list)
-    user_model: dict[str, MemoryEntry] = field(default_factory=dict)
-    agent_profiles: dict[str, MemoryEntry] = field(default_factory=dict)
-    social_rules: list[MemoryEntry] = field(default_factory=list)
+    confirmed_facts: list[FactualMemory] = field(default_factory=list)
+    inferred_memories: list[InferredMemory] = field(default_factory=list)
+    relationship_history: list[RelationshipMemory] = field(default_factory=list)
+    pending_confirmations: list[DurableMemory] = field(default_factory=list)
+    memory_conflicts: list[DurableMemory] = field(default_factory=list)
 
 
 @dataclass(slots=True)
 class PersonalityState:
-    """Personality baseline and adaptive rule state."""
+    """Three-layer personality state with snapshot metadata."""
 
-    baseline_description: str = ""
-    behavioral_rules: list[BehavioralRule] = field(default_factory=list)
-    traits_internal: dict[str, float] = field(default_factory=dict)
-    session_adaptations: list[str] = field(default_factory=list)
+    core_personality: CorePersonality = field(default_factory=CorePersonality)
+    relationship_style: RelationshipStyle = field(default_factory=RelationshipStyle)
+    session_adaptation: SessionAdaptation = field(default_factory=SessionAdaptation)
+    version: int = 1
+    snapshot_version: int = 0
+    last_snapshot_at: str = ""
+    rollback_count: int = 0
+    snapshot_refs: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)

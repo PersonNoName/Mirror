@@ -12,6 +12,11 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+import structlog
+
+
+logger = structlog.get_logger(__name__)
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -155,6 +160,7 @@ class RedisStreamsEventBus(EventBus):
 
     async def start(self) -> None:
         if self.degraded:
+            logger.warning("event_bus_degraded", reason="redis_unavailable")
             return
         event_types = [event_type for event_type, handlers in self._handlers.items() if handlers]
         for event_type in event_types:
@@ -214,10 +220,31 @@ class RedisStreamsEventBus(EventBus):
         delivery_id: str,
         fields: dict[str, Any],
     ) -> None:
-        event = self._deserialize_event(fields, stream_name, delivery_id)
+        try:
+            event = self._deserialize_event(fields, stream_name, delivery_id)
+        except Exception:
+            logger.exception(
+                "event_deserialize_failed",
+                event_type=event_type,
+                stream_name=stream_name,
+                delivery_id=str(delivery_id),
+            )
+            await self.redis_client.xack(stream_name, group_name, delivery_id)
+            return
+
         scope = f"event_consumer:{event_type}"
         if self.idempotency_store is not None:
-            claimed = await self.idempotency_store.claim(scope, event.id)
+            try:
+                claimed = await self.idempotency_store.claim(scope, event.id)
+            except Exception:
+                logger.exception(
+                    "event_idempotency_claim_failed",
+                    event_type=event_type,
+                    stream_name=stream_name,
+                    delivery_id=str(delivery_id),
+                    event_id=event.id,
+                )
+                return
             if not claimed:
                 await self.redis_client.xack(stream_name, group_name, delivery_id)
                 return
@@ -225,9 +252,26 @@ class RedisStreamsEventBus(EventBus):
             for handler in list(self._handlers.get(event_type, [])):
                 await handler(event)
         except Exception:
+            logger.exception(
+                "event_handler_failed",
+                event_type=event_type,
+                stream_name=stream_name,
+                delivery_id=str(delivery_id),
+                event_id=event.id,
+            )
             return
         if self.idempotency_store is not None:
-            await self.idempotency_store.mark_done(scope, event.id)
+            try:
+                await self.idempotency_store.mark_done(scope, event.id)
+            except Exception:
+                logger.exception(
+                    "event_idempotency_mark_done_failed",
+                    event_type=event_type,
+                    stream_name=stream_name,
+                    delivery_id=str(delivery_id),
+                    event_id=event.id,
+                )
+                return
         await self.redis_client.xack(stream_name, group_name, delivery_id)
 
     @staticmethod

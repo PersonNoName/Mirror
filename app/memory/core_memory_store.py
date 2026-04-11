@@ -12,9 +12,16 @@ from app.config import settings
 from app.memory.core_memory import (
     BehavioralRule,
     CapabilityEntry,
+    CorePersonality,
     CoreMemory,
+    DurableMemory,
+    FactualMemory,
+    InferredMemory,
     MemoryEntry,
     PersonalityState,
+    RelationshipStyle,
+    RelationshipMemory,
+    SessionAdaptation,
     SelfCognition,
     TaskExperience,
     WorldModel,
@@ -25,6 +32,46 @@ def _memory_entry_from_dict(data: dict[str, Any]) -> MemoryEntry:
     return MemoryEntry(
         content=data.get("content"),
         is_pinned=bool(data.get("is_pinned", False)),
+    )
+
+
+def _durable_memory_from_dict(data: dict[str, Any], cls: type[DurableMemory] = DurableMemory) -> DurableMemory:
+    return cls(
+        content=str(data.get("content", "")),
+        source=str(data.get("source", "legacy")),
+        confidence=float(data.get("confidence", 0.0)),
+        updated_at=str(data.get("updated_at", "")) or "",
+        confirmed_by_user=bool(data.get("confirmed_by_user", False)),
+        is_pinned=bool(data.get("is_pinned", False)),
+        truth_type=data.get("truth_type", getattr(cls, "truth_type", "fact")),
+        time_horizon=data.get("time_horizon", "long_term"),
+        status=data.get("status", "active"),
+        sensitivity=data.get("sensitivity", "normal"),
+        memory_key=str(data.get("memory_key", "")),
+        conflict_with=list(data.get("conflict_with", [])),
+        metadata=dict(data.get("metadata", {})),
+    )
+
+
+def _relationship_memory_from_dict(data: dict[str, Any]) -> RelationshipMemory:
+    item = _durable_memory_from_dict(data, RelationshipMemory)
+    return RelationshipMemory(
+        content=item.content,
+        source=item.source,
+        confidence=item.confidence,
+        updated_at=item.updated_at,
+        confirmed_by_user=item.confirmed_by_user,
+        is_pinned=item.is_pinned,
+        truth_type="relationship",
+        time_horizon=item.time_horizon,
+        status=item.status,
+        sensitivity=item.sensitivity,
+        memory_key=item.memory_key,
+        conflict_with=item.conflict_with,
+        metadata=item.metadata,
+        subject=str(data.get("subject", "")),
+        relation=str(data.get("relation", "")),
+        object=str(data.get("object", "")),
     )
 
 
@@ -48,6 +95,83 @@ def _behavioral_rule_from_dict(data: dict[str, Any]) -> BehavioralRule:
         is_pinned=bool(data.get("is_pinned", False)),
         metadata=dict(data.get("metadata", {})),
     )
+
+
+def _core_personality_from_dict(data: dict[str, Any]) -> CorePersonality:
+    return CorePersonality(
+        baseline_description=str(data.get("baseline_description", "")),
+        behavioral_rules=[
+            _behavioral_rule_from_dict(item)
+            for item in list(data.get("behavioral_rules", []))
+        ],
+        traits_internal={
+            key: float(value)
+            for key, value in dict(data.get("traits_internal", {})).items()
+        },
+        version=int(data.get("version", 1)),
+        updated_at=str(data.get("updated_at", "")),
+        stable_fields=list(
+            data.get(
+                "stable_fields",
+                ["baseline_description", "behavioral_rules", "traits_internal"],
+            )
+        ),
+    )
+
+
+def _relationship_style_from_dict(data: dict[str, Any]) -> RelationshipStyle:
+    return RelationshipStyle(
+        warmth=float(data.get("warmth", 0.5)),
+        boundary_strength=float(data.get("boundary_strength", 0.8)),
+        supportiveness=float(data.get("supportiveness", 0.6)),
+        humor=float(data.get("humor", 0.3)),
+        preferred_closeness=str(data.get("preferred_closeness", "steady")),
+        updated_at=str(data.get("updated_at", "")),
+    )
+
+
+def _session_adaptation_from_dict(data: dict[str, Any]) -> SessionAdaptation:
+    return SessionAdaptation(
+        current_items=list(data.get("current_items", [])),
+        session_id=str(data.get("session_id", "")),
+        created_at=str(data.get("created_at", "")),
+        expires_at=str(data.get("expires_at", "")),
+        max_items=int(data.get("max_items", 5)),
+    )
+
+
+def _legacy_world_model_items_to_facts(items: list[dict[str, Any]], section: str) -> list[FactualMemory]:
+    facts: list[FactualMemory] = []
+    for index, item in enumerate(items):
+        entry = _memory_entry_from_dict(item)
+        facts.append(
+            FactualMemory(
+                content=str(entry.content),
+                source="legacy_snapshot",
+                confirmed_by_user=True,
+                is_pinned=entry.is_pinned,
+                memory_key=f"{section}:{index}",
+                metadata={"legacy_section": section},
+            )
+        )
+    return facts
+
+
+def _legacy_mapping_to_facts(items: dict[str, dict[str, Any]], section: str) -> list[FactualMemory]:
+    facts: list[FactualMemory] = []
+    for key, raw in items.items():
+        entry = _memory_entry_from_dict(raw)
+        facts.append(
+            FactualMemory(
+                content=str(entry.content),
+                source="legacy_snapshot",
+                confirmed_by_user=True,
+                is_pinned=entry.is_pinned,
+                memory_key=f"{section}:{key}",
+                metadata={"legacy_section": section, "label": key},
+            )
+        )
+    return facts
 
 
 def _core_memory_from_dict(data: dict[str, Any]) -> CoreMemory:
@@ -77,34 +201,60 @@ def _core_memory_from_dict(data: dict[str, Any]) -> CoreMemory:
             version=int(self_cognition.get("version", 1)),
         ),
         world_model=WorldModel(
-            env_constraints=[
-                _memory_entry_from_dict(item)
-                for item in list(world_model.get("env_constraints", []))
+            confirmed_facts=[
+                _durable_memory_from_dict(item, FactualMemory)
+                for item in list(world_model.get("confirmed_facts", []))
+            ]
+            or (
+                _legacy_world_model_items_to_facts(list(world_model.get("env_constraints", [])), "env_constraints")
+                + _legacy_mapping_to_facts(dict(world_model.get("user_model", {})), "user_model")
+                + _legacy_mapping_to_facts(dict(world_model.get("agent_profiles", {})), "agent_profiles")
+                + _legacy_world_model_items_to_facts(list(world_model.get("social_rules", [])), "social_rules")
+            ),
+            inferred_memories=[
+                _durable_memory_from_dict(item, InferredMemory)
+                for item in list(world_model.get("inferred_memories", []))
             ],
-            user_model={
-                key: _memory_entry_from_dict(value)
-                for key, value in dict(world_model.get("user_model", {})).items()
-            },
-            agent_profiles={
-                key: _memory_entry_from_dict(value)
-                for key, value in dict(world_model.get("agent_profiles", {})).items()
-            },
-            social_rules=[
-                _memory_entry_from_dict(item)
-                for item in list(world_model.get("social_rules", []))
+            relationship_history=[
+                _relationship_memory_from_dict(item)
+                for item in list(world_model.get("relationship_history", []))
+            ],
+            pending_confirmations=[
+                _durable_memory_from_dict(item)
+                for item in list(world_model.get("pending_confirmations", []))
+            ],
+            memory_conflicts=[
+                _durable_memory_from_dict(item)
+                for item in list(world_model.get("memory_conflicts", []))
             ],
         ),
         personality=PersonalityState(
-            baseline_description=personality.get("baseline_description", ""),
-            behavioral_rules=[
-                _behavioral_rule_from_dict(item)
-                for item in list(personality.get("behavioral_rules", []))
-            ],
-            traits_internal={
-                key: float(value)
-                for key, value in dict(personality.get("traits_internal", {})).items()
-            },
-            session_adaptations=list(personality.get("session_adaptations", [])),
+            core_personality=_core_personality_from_dict(
+                dict(personality.get("core_personality", {}))
+                if personality.get("core_personality")
+                else {
+                    "baseline_description": personality.get("baseline_description", ""),
+                    "behavioral_rules": list(personality.get("behavioral_rules", [])),
+                    "traits_internal": dict(personality.get("traits_internal", {})),
+                    "version": personality.get("version", 1),
+                }
+            ),
+            relationship_style=_relationship_style_from_dict(
+                dict(personality.get("relationship_style", {}))
+            ),
+            session_adaptation=_session_adaptation_from_dict(
+                dict(personality.get("session_adaptation", {}))
+                if personality.get("session_adaptation")
+                else {
+                    "current_items": list(personality.get("session_adaptations", [])),
+                    "max_items": 5,
+                }
+            ),
+            version=int(personality.get("version", 1)),
+            snapshot_version=int(personality.get("snapshot_version", 0)),
+            last_snapshot_at=str(personality.get("last_snapshot_at", "")),
+            rollback_count=int(personality.get("rollback_count", 0)),
+            snapshot_refs=list(personality.get("snapshot_refs", [])),
         ),
         task_experience=TaskExperience(
             lesson_digest=[

@@ -5,7 +5,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import structlog
+
 from app.platform.base import OutboundMessage, PlatformContext
+
+
+logger = structlog.get_logger(__name__)
 
 
 class TaskWorker:
@@ -121,10 +126,29 @@ class TaskWorker:
             task.status = "pending"
             await self.task_store.update(task)
             await self.task_system.publish_retry(task)
+            logger.warning(
+                "task_retry_scheduled",
+                task_id=task.id,
+                assigned_to=task.assigned_to,
+                retry_count=task.retry_count,
+                max_retries=task.max_retries,
+                error_type=normalized,
+            )
             return
 
-        await self.blackboard.on_task_failed(task, error)
+        terminal_status = "failed"
+        if normalized in {"INTERRUPTED", "CANCELLED"}:
+            terminal_status = normalized.lower()
+
+        await self.blackboard.on_task_failed(task, error, status=terminal_status)
         await self.task_system.publish_dlq(task, error)
+        logger.warning(
+            "task_dlq_published",
+            task_id=task.id,
+            assigned_to=task.assigned_to,
+            terminal_status=terminal_status,
+            error_type=normalized,
+        )
         await self._notify_failure(task, error)
 
     async def _notify_session(self, task: Any, output: dict[str, Any]) -> None:
@@ -137,7 +161,7 @@ class TaskWorker:
         ctx = PlatformContext(platform="web", user_id=user_id, session_id=session_id)
         await self.platform_adapter.send_outbound(
             ctx,
-            OutboundMessage(type="text", content=output.get("summary") or "任务已完成。", metadata=output),
+            OutboundMessage(type="text", content=output.get("summary") or "Task completed.", metadata=output),
         )
 
     async def _notify_failure(self, task: Any, error: str) -> None:
@@ -150,7 +174,7 @@ class TaskWorker:
         ctx = PlatformContext(platform="web", user_id=user_id, session_id=session_id)
         await self.platform_adapter.send_outbound(
             ctx,
-            OutboundMessage(type="text", content=f"任务执行失败：{error}"),
+            OutboundMessage(type="text", content=f"Task execution failed: {error}"),
         )
 
     @staticmethod

@@ -7,6 +7,11 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+import structlog
+
+
+logger = structlog.get_logger(__name__)
+
 
 class OutboxRelay:
     """Best-effort outbox relay with graceful degradation."""
@@ -19,6 +24,8 @@ class OutboxRelay:
         self.degraded = redis_client is None
 
     def start(self) -> None:
+        if self.degraded:
+            logger.warning("outbox_relay_degraded", reason="redis_unavailable")
         self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
@@ -38,15 +45,31 @@ class OutboxRelay:
                         fields = self._build_stream_fields(event)
                         await self.redis_client.xadd(event.topic, fields)
                         await self.outbox_store.mark_published(event.id)
+                        logger.info(
+                            "outbox_relay_published",
+                            event_id=event.id,
+                            topic=event.topic,
+                        )
                     except Exception as exc:
                         await self.outbox_store.schedule_retry(
                             event.id,
                             event.retry_count + 1,
                             str(exc),
                         )
+                        logger.warning(
+                            "outbox_relay_retry_scheduled",
+                            event_id=event.id,
+                            topic=event.topic,
+                            retry_count=event.retry_count + 1,
+                        )
                         continue
                 else:
-                    await self.outbox_store.mark_published(event.id)
+                    logger.warning(
+                        "outbox_relay_publish_skipped",
+                        event_id=event.id,
+                        topic=event.topic,
+                        reason="redis_unavailable",
+                    )
             await asyncio.sleep(self.interval_seconds)
 
     @staticmethod

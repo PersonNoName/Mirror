@@ -17,6 +17,7 @@ from app.evolution import (
     CognitionUpdater,
     CoreMemoryScheduler,
     Event,
+    EvolutionCandidateManager,
     EvolutionJournal,
     EvolutionScheduler,
     MetaCognitionReflector,
@@ -76,6 +77,7 @@ class RuntimeContext:
     event_bus_event_factory: Any
     core_memory_scheduler: CoreMemoryScheduler
     evolution_journal: EvolutionJournal
+    evolution_candidate_manager: EvolutionCandidateManager | None
     personality_evolver: PersonalityEvolver
     observer: ObserverEngine
     reflector: MetaCognitionReflector
@@ -95,43 +97,98 @@ class RuntimeContext:
     skill_summary: dict[str, Any] = field(default_factory=dict)
     mcp_summary: dict[str, Any] = field(default_factory=dict)
     builtins_summary: dict[str, Any] = field(default_factory=dict)
+    startup_degraded_reasons: list[str] = field(default_factory=list)
 
     def health_snapshot(self) -> dict[str, Any]:
+        skill_loaded = len(self.skill_summary.get("loaded", []))
+        skill_skipped = len(self.skill_summary.get("skipped", []))
+        skill_failed = len(self.skill_summary.get("failed", []))
+        mcp_loaded = len(self.mcp_summary.get("loaded", []))
+        mcp_skipped = len(self.mcp_summary.get("skipped", []))
+        mcp_failed = len(self.mcp_summary.get("failed", []))
+        degraded_worker_count = sum(1 for worker in self.worker_manager.workers if worker.degraded)
         subsystems = {
             "app": {"status": "ok"},
-            "postgres": {"status": "degraded" if self.task_store.degraded else "ok"},
-            "redis": {"status": "degraded" if self.redis_client is None else "ok"},
-            "neo4j": {"status": "degraded" if self.graph_store is None else "ok"},
-            "qdrant": {"status": "degraded" if self.vector_retriever is None else "ok"},
+            "postgres": {
+                "status": "degraded" if self.task_store.degraded else "ok",
+                "reason": "postgres_unavailable" if self.task_store.degraded else None,
+            },
+            "redis": {
+                "status": "degraded" if self.redis_client is None else "ok",
+                "reason": "redis_unavailable" if self.redis_client is None else None,
+            },
+            "neo4j": {
+                "status": "degraded" if self.graph_store is None else "ok",
+                "reason": "neo4j_unavailable" if self.graph_store is None else None,
+            },
+            "qdrant": {
+                "status": "degraded" if self.vector_retriever is None else "ok",
+                "reason": "qdrant_unavailable" if self.vector_retriever is None else None,
+            },
             "event_bus": {"status": "degraded" if self.event_bus.degraded else "ok"},
+            "outbox_relay": {
+                "status": "degraded" if self.outbox_relay.degraded else "ok",
+                "reason": "redis_unavailable" if self.outbox_relay.degraded else None,
+            },
+            "session_context": {
+                "status": "degraded" if isinstance(self.session_context_store, _NullSessionContextStore) else "ok",
+                "reason": "redis_unavailable" if isinstance(self.session_context_store, _NullSessionContextStore) else None,
+            },
             "worker_manager": {
-                "status": "degraded" if any(worker.degraded for worker in self.worker_manager.workers) else "ok",
+                "status": "degraded" if degraded_worker_count else "ok",
                 "workers": len(self.worker_manager.workers),
+                "degraded_workers": degraded_worker_count,
             },
             "scheduler": {"status": "ok" if self.evolution_scheduler._task is not None else "degraded"},
             "skill_loader": {
-                "status": "ok" if not self.skill_summary.get("failed") else "degraded",
+                "status": "ok" if not skill_failed else "degraded",
                 "summary": self.skill_summary,
+                "loaded_count": skill_loaded,
+                "skipped_count": skill_skipped,
+                "failed_count": skill_failed,
             },
             "mcp_loader": {
-                "status": "ok" if not self.mcp_summary.get("failed") else "degraded",
+                "status": "ok" if not mcp_failed else "degraded",
                 "summary": self.mcp_summary,
+                "loaded_count": mcp_loaded,
+                "skipped_count": mcp_skipped,
+                "failed_count": mcp_failed,
+            },
+            "evolution_pipeline": self.evolution_candidate_manager.summary()
+            if self.evolution_candidate_manager is not None
+            else {
+                "pending_candidate_count": 0,
+                "high_risk_pending_count": 0,
+                "recent_reverted_count": 0,
+                "degraded": True,
+                "status": "degraded",
             },
         }
+        if "status" not in subsystems["evolution_pipeline"]:
+            subsystems["evolution_pipeline"]["status"] = (
+                "degraded" if subsystems["evolution_pipeline"]["degraded"] else "ok"
+            )
         top_level = "ok"
         if any(item["status"] == "degraded" for item in subsystems.values()):
             top_level = "degraded"
-        return {"status": top_level, "subsystems": subsystems}
+        return {
+            "status": top_level,
+            "streaming_available": self.redis_client is not None,
+            "subsystems": subsystems,
+            "startup_degraded_reasons": list(self.startup_degraded_reasons),
+        }
 
 
 async def bootstrap_runtime() -> RuntimeContext:
     """Create a fully wired runtime following the documented startup order."""
 
     redis_client: Redis | None = None
+    startup_degraded_reasons: list[str] = []
     task_store = TaskStore()
     await task_store.initialize()
     if task_store.degraded:
         logger.warning("task_store_degraded", reason="postgres_unavailable")
+        startup_degraded_reasons.append("postgres_unavailable")
 
     outbox_store = OutboxStore()
     await outbox_store.initialize()
@@ -141,6 +198,12 @@ async def bootstrap_runtime() -> RuntimeContext:
 
     evolution_journal = EvolutionJournal()
     await evolution_journal.initialize()
+    evolution_candidate_manager: EvolutionCandidateManager | None = None
+    try:
+        evolution_candidate_manager = EvolutionCandidateManager(evolution_journal)
+    except Exception:
+        logger.warning("evolution_candidate_manager_degraded", reason="pipeline_initialization_failed")
+        startup_degraded_reasons.append("evolution_pipeline_unavailable")
 
     try:
         redis_client = Redis.from_url(settings.redis.url)
@@ -148,6 +211,7 @@ async def bootstrap_runtime() -> RuntimeContext:
     except Exception:
         redis_client = None
         logger.warning("redis_degraded", reason="redis_unavailable")
+        startup_degraded_reasons.append("redis_unavailable")
 
     model_registry = ModelProviderRegistry(build_routing_from_settings(settings))
     core_memory_store = CoreMemoryStore()
@@ -159,6 +223,7 @@ async def bootstrap_runtime() -> RuntimeContext:
         graph_store = GraphStore()
     except Exception:
         logger.warning("graph_store_degraded", reason="neo4j_unavailable")
+        startup_degraded_reasons.append("neo4j_unavailable")
 
     vector_retriever = None
     try:
@@ -168,6 +233,13 @@ async def bootstrap_runtime() -> RuntimeContext:
         )
     except Exception:
         logger.warning("vector_retriever_degraded", reason="qdrant_unavailable")
+        startup_degraded_reasons.append("qdrant_unavailable")
+
+    if startup_degraded_reasons:
+        logger.warning(
+            "runtime_startup_degraded",
+            reasons=startup_degraded_reasons,
+        )
 
     event_bus = RedisStreamsEventBus(
         redis_client=redis_client,
@@ -200,6 +272,9 @@ async def bootstrap_runtime() -> RuntimeContext:
         core_memory_scheduler=core_memory_scheduler,
         evolution_journal=evolution_journal,
         snapshot_store=snapshot_store,
+        candidate_manager=evolution_candidate_manager,
+        task_store=task_store,
+        blackboard=blackboard,
     )
     signal_extractor = SignalExtractor(personality_evolver=personality_evolver)
     observer = ObserverEngine(
@@ -219,6 +294,9 @@ async def bootstrap_runtime() -> RuntimeContext:
         core_memory_cache=core_memory_cache,
         core_memory_scheduler=core_memory_scheduler,
         graph_store=graph_store,
+        task_store=task_store,
+        blackboard=blackboard,
+        candidate_manager=evolution_candidate_manager,
     )
     scheduler = EvolutionScheduler(
         core_memory_scheduler=core_memory_scheduler,
@@ -249,6 +327,10 @@ async def bootstrap_runtime() -> RuntimeContext:
     await event_bus.subscribe("task_completed", reflector.handle_task_completed)
     await event_bus.subscribe("task_failed", reflector.handle_task_failed)
     await event_bus.subscribe("lesson_generated", cognition_updater.handle_lesson_generated)
+    if hasattr(cognition_updater, "handle_hitl_feedback"):
+        await event_bus.subscribe("hitl_feedback", cognition_updater.handle_hitl_feedback)
+    if hasattr(personality_evolver, "handle_hitl_feedback"):
+        await event_bus.subscribe("hitl_feedback", personality_evolver.handle_hitl_feedback)
 
     agent_registry.register(
         CodeAgent(task_store=task_store, blackboard=blackboard, task_system=task_system),
@@ -301,6 +383,7 @@ async def bootstrap_runtime() -> RuntimeContext:
         event_bus_event_factory=lambda event_type, payload: Event(type=event_type, payload=payload),
         core_memory_scheduler=core_memory_scheduler,
         evolution_journal=evolution_journal,
+        evolution_candidate_manager=evolution_candidate_manager,
         personality_evolver=personality_evolver,
         observer=observer,
         reflector=reflector,
@@ -320,6 +403,7 @@ async def bootstrap_runtime() -> RuntimeContext:
         skill_summary=skill_summary,
         mcp_summary=mcp_summary,
         builtins_summary={"loaded": builtins},
+        startup_degraded_reasons=startup_degraded_reasons,
     )
 
 
@@ -344,7 +428,7 @@ async def stop_runtime(runtime: RuntimeContext) -> None:
 def bind_runtime_state(app: FastAPI, runtime: RuntimeContext) -> None:
     """Mirror the runtime context onto FastAPI state for route handlers."""
 
-    app.state.streaming_disabled = False if runtime.redis_client is not None else False
+    app.state.streaming_disabled = runtime.redis_client is None
     for field_info in fields(runtime):
         setattr(app.state, field_info.name, getattr(runtime, field_info.name))
     app.state.runtime = runtime

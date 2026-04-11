@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from neo4j import AsyncGraphDatabase
@@ -52,16 +53,35 @@ class GraphStore:
         relation: str,
         object: str,
         confidence: float,
+        source: str = "lesson",
+        confirmed_by_user: bool = False,
+        status: str = "active",
+        time_horizon: str = "long_term",
+        sensitivity: str = "normal",
+        conflict_with: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         relation = self._validate_relation(relation)
+        now = datetime.now(timezone.utc).isoformat()
         query = f"""
         MERGE (s:MemoryEntity {{user_id: $user_id, name: $subject}})
         MERGE (o:MemoryEntity {{user_id: $user_id, name: $object}})
-        MERGE (s)-[r:{relation} {{user_id: $user_id}}]->(o)
-        SET r.confidence = $confidence,
-            r.metadata_json = $metadata_json,
-            r.updated_at = datetime()
+        OPTIONAL MATCH (s)-[existing:{relation} {{user_id: $user_id}}]->(o)
+        WHERE existing.status = 'active' AND $status = 'active'
+        SET existing.status = 'superseded',
+            existing.metadata_json = coalesce(existing.metadata_json, '{{}}')
+        CREATE (s)-[r:{relation} {{
+            user_id: $user_id,
+            source: $source,
+            confidence: $confidence,
+            updated_at: $updated_at,
+            confirmed_by_user: $confirmed_by_user,
+            status: $status,
+            time_horizon: $time_horizon,
+            sensitivity: $sensitivity,
+            conflict_with_json: $conflict_with_json,
+            metadata_json: $metadata_json
+        }}]->(o)
         """
         async with self._driver.session(database=self.database) as session:
             await session.run(
@@ -70,6 +90,13 @@ class GraphStore:
                 subject=subject,
                 object=object,
                 confidence=confidence,
+                source=source,
+                updated_at=now,
+                confirmed_by_user=confirmed_by_user,
+                status=status,
+                time_horizon=time_horizon,
+                sensitivity=sensitivity,
+                conflict_with_json=json.dumps(conflict_with or []),
                 metadata_json=json.dumps(metadata or {}),
             )
 
@@ -88,7 +115,14 @@ class GraphStore:
         RETURN s.name AS subject,
                type(r) AS relation,
                o.name AS object,
+               r.source AS source,
                r.confidence AS confidence,
+               r.updated_at AS updated_at,
+               r.confirmed_by_user AS confirmed_by_user,
+               r.status AS status,
+               r.time_horizon AS time_horizon,
+               r.sensitivity AS sensitivity,
+               r.conflict_with_json AS conflict_with_json,
                r.metadata_json AS metadata_json
         LIMIT 1
         """
@@ -103,6 +137,7 @@ class GraphStore:
         if record is None:
             return None
         payload = dict(record)
+        payload["conflict_with"] = json.loads(payload.pop("conflict_with_json") or "[]")
         payload["metadata"] = json.loads(payload.pop("metadata_json") or "{}")
         return payload
 
@@ -122,7 +157,14 @@ class GraphStore:
         RETURN s.name AS subject,
                type(r) AS relation,
                o.name AS object,
+               r.source AS source,
                r.confidence AS confidence,
+               r.updated_at AS updated_at,
+               r.confirmed_by_user AS confirmed_by_user,
+               r.status AS status,
+               r.time_horizon AS time_horizon,
+               r.sensitivity AS sensitivity,
+               r.conflict_with_json AS conflict_with_json,
                r.metadata_json AS metadata_json
         ORDER BY r.updated_at DESC
         LIMIT $limit
@@ -138,6 +180,7 @@ class GraphStore:
         parsed: list[dict[str, Any]] = []
         for record in records:
             payload = dict(record)
+            payload["conflict_with"] = json.loads(payload.pop("conflict_with_json") or "[]")
             payload["metadata"] = json.loads(payload.pop("metadata_json") or "{}")
             parsed.append(payload)
         return parsed
@@ -148,7 +191,7 @@ class GraphStore:
             return "No world model facts recorded yet."
         lines = [
             f"{item['subject']} {item['relation']} {item['object']} "
-            f"(confidence={item.get('confidence', 0.0):.2f})"
+            f"(confidence={item.get('confidence', 0.0):.2f}, status={item.get('status', 'active')})"
             for item in relations
         ]
         return "; ".join(lines)

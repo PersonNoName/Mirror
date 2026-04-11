@@ -5,7 +5,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.hooks import HookRegistry, HookPoint
+from app.memory import (
+    CapabilityEntry,
+    CoreMemory,
+    DurableMemory,
+    MemoryEntry,
+    RelationshipMemory,
+    TaskExperience,
+    WorldModel,
+)
+from app.hooks import HookPoint, HookRegistry
 from app.memory import CoreMemoryCache, SessionContextStore, VectorRetriever
 from app.platform.base import InboundMessage
 from app.providers.openai_compat import ProviderRequestError
@@ -14,43 +23,47 @@ from app.soul.models import Action
 
 
 SOUL_SYSTEM_PROMPT_TEMPLATE = """
-你是一个平等的合作者，不是用户的仆人。
+You are Mirror's foreground reasoning agent.
+You are a direct collaborator, not a submissive assistant.
 
-## 你的自我认知
+## Self Cognition
 {self_cognition}
 
-## 你对世界的理解
+## World Model
 {world_model}
 
-## 你的人格基调
-{baseline_description}
+## Stable Identity
+{stable_identity}
 
-## 你从交互中学到的行为规则（必须遵守）
-{behavioral_rules}
+## Relationship Style
+{relationship_style}
 
-## 本次对话适应（仅当前 Session 有效）
+## Session Adaptation
 {session_adaptations}
 
-## 你积累的经验
+## Task Experience
 {task_experience}
 
-## 工具列表
+## Available Tools
 {tool_list}
 
-## 行为约束
-- 禁止使用讨好性词汇（"当然！"、"好的！"、"我很乐意..."）
-- 若认为用户请求不合理，必须在 inner_thoughts 中记录异议
-- 先思考，再行动：任何动作前必须生成 <inner_thoughts>
+## Constraints
+- Avoid filler acknowledgements such as "of course", "sure", or "glad to help".
+- If the user's request is unreasonable, record that in `<inner_thoughts>`.
+- Treat confirmed facts as highest-trust memory.
+- Never present an inferred memory as if the user explicitly confirmed it.
+- If memory conflicts exist, answer conservatively or ask for confirmation.
+- Think before acting. Every action must follow the required output format.
 
-## 输出格式
+## Output Format
 <inner_thoughts>
-[你的内部独白]
+[private reasoning]
 </inner_thoughts>
 <action>
 [one of: direct_reply | tool_call | publish_task | hitl_relay]
 </action>
 <content>
-[对应动作的内容]
+[content for the selected action]
 </content>
 """.strip()
 
@@ -147,46 +160,210 @@ class SoulEngine:
 
     def _build_prompt(
         self,
-        core_memory: Any,
+        core_memory: CoreMemory,
         recent_messages: list[dict[str, Any]],
         session_adaptations_live: list[str],
         retrieved: dict[str, Any],
     ) -> str:
         tool_descriptions = self.tool_registry.describe_tools()
         tool_list = "\n".join(
-            f"- {item['name']}: {item['description'] or '无描述'} | schema={item['schema']}"
+            f"- {item['name']}: {item['description'] or 'No description'} | schema={item['schema']}"
             for item in tool_descriptions
-        ) or "- 当前无可用工具"
+        ) or "- No tools are currently registered."
+        core_personality = core_memory.personality.core_personality
         behavioral_rules = "\n".join(
-            f"- {rule.rule}" for rule in core_memory.personality.behavioral_rules
-        ) or "- 暂无持久行为规则"
-        merged_adaptations = list(core_memory.personality.session_adaptations) + [
-            item for item in session_adaptations_live if item not in core_memory.personality.session_adaptations
+            f"- {rule.rule}" for rule in core_personality.behavioral_rules
+        ) or "- No persistent behavioral rules."
+        persisted_adaptations = list(core_memory.personality.session_adaptation.current_items)
+        merged_adaptations = persisted_adaptations + [
+            item for item in session_adaptations_live if item not in persisted_adaptations
         ]
         session_adaptations = "\n".join(
             f"- {item}" for item in merged_adaptations
-        ) or "- 暂无当前会话适应"
+        ) or "- No active session adaptations for this session."
         recent_dialogue = "\n".join(
             f"{item.get('role', 'unknown')}: {item.get('content', '')}" for item in recent_messages[-5:]
-        ) or "无"
+        ) or "No recent dialogue."
         retrieved_context = "\n".join(
-            f"- [{item.get('namespace', 'unknown')}] {item.get('content', '')}"
+            (
+                f"- [{item.get('namespace', 'unknown')}|{item.get('truth_type', 'fact')}|"
+                f"{item.get('status', 'active')}] {item.get('content', '')}"
+            )
             for item in retrieved.get("matches", [])
-        ) or "- 暂无检索命中"
+        ) or "- No retrieved context."
 
         return "\n\n".join(
             [
                 SOUL_SYSTEM_PROMPT_TEMPLATE.format(
-                    self_cognition=core_memory.self_cognition,
-                    world_model=core_memory.world_model,
-                    baseline_description=core_memory.personality.baseline_description or "冷静、直接、合作式",
-                    behavioral_rules=behavioral_rules,
-                    session_adaptations=session_adaptations,
-                    task_experience=core_memory.task_experience,
+                    self_cognition=self._format_self_cognition(core_memory),
+                    world_model=self._format_world_model(core_memory.world_model),
+                    stable_identity=self._format_stable_identity(core_memory, behavioral_rules),
+                    relationship_style=self._format_relationship_style(core_memory),
+                    session_adaptations=(
+                        "These adaptations are temporary and only apply to the current session.\n"
+                        f"{session_adaptations}"
+                    ),
+                    task_experience=self._format_task_experience(core_memory.task_experience),
                     tool_list=tool_list,
                 ),
                 f"## Session Raw Context\n{recent_dialogue}",
                 f"## Retrieved Context\n{retrieved_context}",
+            ]
+        )
+
+    @staticmethod
+    def _format_memory_entries(entries: list[MemoryEntry], empty_text: str) -> str:
+        lines = [f"- {entry.content}" for entry in entries if str(entry.content).strip()]
+        return "\n".join(lines) or f"- {empty_text}"
+
+    @staticmethod
+    def _format_capability_map(capability_map: dict[str, CapabilityEntry]) -> str:
+        if not capability_map:
+            return "- No explicit capabilities recorded."
+        lines: list[str] = []
+        for name, entry in capability_map.items():
+            description = entry.description.strip() or name
+            details: list[str] = [description]
+            if entry.confidence > 0:
+                details.append(f"confidence={entry.confidence:.2f}")
+            if entry.limitations:
+                details.append(f"limitations={', '.join(item for item in entry.limitations if item)}")
+            lines.append(f"- {name}: {' | '.join(details)}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _format_self_cognition(cls, core_memory: CoreMemory) -> str:
+        self_cognition = core_memory.self_cognition
+        return "\n".join(
+            [
+                "Capabilities:",
+                cls._format_capability_map(self_cognition.capability_map),
+                "Known Limits:",
+                cls._format_memory_entries(self_cognition.known_limits, "No known limits recorded."),
+                "Mission Clarity:",
+                cls._format_memory_entries(self_cognition.mission_clarity, "No mission guidance recorded."),
+                "Blindspots:",
+                cls._format_memory_entries(self_cognition.blindspots, "No blindspots recorded."),
+            ]
+        )
+
+    @classmethod
+    def _format_world_model(cls, world_model: WorldModel) -> str:
+        confirmed_facts = cls._format_durable_entries(
+            world_model.confirmed_facts,
+            "No confirmed facts recorded.",
+        )
+        inferred_memories = cls._format_durable_entries(
+            world_model.inferred_memories,
+            "No inferred memories recorded.",
+        )
+        relationship_history = cls._format_relationship_entries(
+            world_model.relationship_history,
+            "No relationship history recorded.",
+        )
+        pending_confirmations = cls._format_durable_entries(
+            world_model.pending_confirmations,
+            "No pending confirmations.",
+        )
+        memory_conflicts = cls._format_durable_entries(
+            world_model.memory_conflicts,
+            "No memory conflicts recorded.",
+        )
+        return "\n".join(
+            [
+                "Confirmed Facts:",
+                confirmed_facts,
+                "Inferred Memory:",
+                inferred_memories,
+                "Relationship History:",
+                relationship_history,
+                "Pending Confirmation:",
+                pending_confirmations,
+                "Memory Conflicts:",
+                memory_conflicts,
+            ]
+        )
+
+    @staticmethod
+    def _format_stable_identity(core_memory: CoreMemory, behavioral_rules: str) -> str:
+        core_personality = core_memory.personality.core_personality
+        baseline = core_personality.baseline_description or "Calm, direct, collaborative."
+        version = core_personality.version
+        updated_at = core_personality.updated_at or "unknown"
+        return "\n".join(
+            [
+                f"Baseline: {baseline}",
+                f"Version: {version}",
+                f"Updated At: {updated_at}",
+                "Behavioral Rules:",
+                behavioral_rules,
+            ]
+        )
+
+    @staticmethod
+    def _format_relationship_style(core_memory: CoreMemory) -> str:
+        style = core_memory.personality.relationship_style
+        return "\n".join(
+            [
+                f"- warmth={style.warmth:.2f}",
+                f"- boundary_strength={style.boundary_strength:.2f}",
+                f"- supportiveness={style.supportiveness:.2f}",
+                f"- humor={style.humor:.2f}",
+                f"- preferred_closeness={style.preferred_closeness}",
+            ]
+        )
+
+    @staticmethod
+    def _format_durable_entries(entries: list[DurableMemory], empty_text: str) -> str:
+        lines = []
+        for entry in entries:
+            content = str(entry.content).strip()
+            if not content:
+                continue
+            status = "confirmed" if entry.confirmed_by_user else entry.status
+            lines.append(
+                f"- [{entry.truth_type}|{status}|confidence={entry.confidence:.2f}|source={entry.source}] {content}"
+            )
+        return "\n".join(lines) or f"- {empty_text}"
+
+    @staticmethod
+    def _format_relationship_entries(entries: list[RelationshipMemory], empty_text: str) -> str:
+        lines = []
+        for entry in entries:
+            relation_text = f"{entry.subject} {entry.relation} {entry.object}".strip()
+            content = relation_text if relation_text else str(entry.content).strip()
+            if not content:
+                continue
+            status = "confirmed" if entry.confirmed_by_user else entry.status
+            lines.append(
+                f"- [relationship|{status}|confidence={entry.confidence:.2f}|source={entry.source}] {content}"
+            )
+        return "\n".join(lines) or f"- {empty_text}"
+
+    @classmethod
+    def _format_task_experience(cls, task_experience: TaskExperience) -> str:
+        lesson_digest = cls._format_memory_entries(
+            task_experience.lesson_digest,
+            "No lesson digests recorded.",
+        )
+        domain_tips = "\n".join(
+            f"- {domain}: {', '.join(str(item.content) for item in items if str(item.content).strip())}"
+            for domain, items in task_experience.domain_tips.items()
+            if any(str(item.content).strip() for item in items)
+        ) or "- No domain tips recorded."
+        agent_habits = "\n".join(
+            f"- {agent}: {', '.join(str(item.content) for item in items if str(item.content).strip())}"
+            for agent, items in task_experience.agent_habits.items()
+            if any(str(item.content).strip() for item in items)
+        ) or "- No agent habits recorded."
+        return "\n".join(
+            [
+                "Lesson Digest:",
+                lesson_digest,
+                "Domain Tips:",
+                domain_tips,
+                "Agent Habits:",
+                agent_habits,
             ]
         )
 
@@ -223,12 +400,12 @@ class SoulEngine:
     @staticmethod
     def _fallback_action(message: InboundMessage, raw_response: str = "") -> Action:
         reply = (
-            "我是 Mirror 的主代理，目前运行在本地降级模式。"
-            f"你刚刚说的是：{message.text}"
+            "Mirror is running in local fallback mode because the reasoning model is unavailable. "
+            f"Your latest message was: {message.text}"
         )
         return Action(
             type="direct_reply",
             content=reply,
-            inner_thoughts="模型不可用，使用本地回退直答。",
+            inner_thoughts="Reasoning model unavailable. Return a safe direct reply.",
             raw_response=raw_response,
         )
