@@ -96,6 +96,73 @@ flowchart LR
     EV --> RD
 ```
 
+### 细化架构图
+
+下面这张图更适合开发视角，用来理解运行时内各个核心模块如何协作：
+
+```mermaid
+flowchart TB
+    subgraph ClientSide["Client / Access"]
+        C1["HTTP Client"]
+        C2["SSE Client"]
+    end
+
+    subgraph App["FastAPI Runtime"]
+        API["API Routers"]
+        WP["WebPlatformAdapter"]
+        SE["SoulEngine"]
+        AR["ActionRouter"]
+        TS["TaskSystem"]
+        BB["Blackboard"]
+        WM["TaskWorkerManager"]
+        OR["OutboxRelay"]
+        TM["TaskMonitor"]
+        ES["EvolutionScheduler"]
+        EVO["Observer / Reflector / CognitionUpdater / PersonalityEvolver"]
+        MEM["CoreMemoryCache / SessionContext / Governance"]
+        TOOL["Tool Registry / Hook Registry"]
+        EXT["SkillLoader / MCPToolAdapter / AgentRegistry"]
+    end
+
+    subgraph Storage["Storage / Infra"]
+        PG["PostgreSQL"]
+        RD["Redis"]
+        N4["Neo4j"]
+        QD["Qdrant"]
+        OC["OpenCode / opencode"]
+    end
+
+    C1 --> API
+    C2 --> API
+    API --> WP
+    WP --> MEM
+    MEM --> SE
+    SE --> AR
+    AR --> TOOL
+    AR --> TS
+    TS --> BB
+    BB --> WM
+    WM --> OC
+    TS --> OR
+    TS --> TM
+    API --> ES
+    ES --> EVO
+    EVO --> MEM
+    EXT --> TOOL
+    EXT --> WM
+
+    MEM --> PG
+    MEM --> N4
+    MEM --> QD
+    MEM --> RD
+    TS --> PG
+    TS --> RD
+    OR --> RD
+    TM --> PG
+    EVO --> PG
+    EVO --> RD
+```
+
 ## 核心模块说明
 
 ### 1. API 层
@@ -299,6 +366,28 @@ Mirror 的设计不是“依赖少一个就完全起不来”，而是尽量在�
 5. `ActionRouter` 决定直接回复、发布任务或进入 HITL
 6. 如果启用流式，客户端通过 `GET /chat/stream` 订阅会话事件
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as Chat API
+    participant Platform as WebPlatformAdapter
+    participant Memory as Memory Layer
+    participant Soul as SoulEngine
+    participant Router as ActionRouter
+    participant Session as SessionContextStore
+
+    Client->>API: POST /chat
+    API->>Platform: normalize_inbound()
+    API->>Memory: mark_session_active()
+    API->>Session: append user message
+    API->>Soul: run(inbound)
+    Soul-->>API: action
+    API->>Router: route(action, inbound)
+    Router-->>API: result
+    API->>Session: append assistant message
+    API-->>Client: ChatResponse
+```
+
 ### 异步任务链路
 
 1. `ActionRouter` 发布任务
@@ -307,6 +396,27 @@ Mirror 的设计不是“依赖少一个就完全起不来”，而是尽量在�
 4. `Blackboard` 与 `TaskWorkerManager` 协调 agent 执行
 5. 任务完成、失败或等待 HITL 时回写状态
 
+```mermaid
+sequenceDiagram
+    participant Router as ActionRouter
+    participant TaskSystem
+    participant PG as PostgreSQL
+    participant Relay as OutboxRelay
+    participant Redis
+    participant Blackboard
+    participant Worker as TaskWorker
+
+    Router->>TaskSystem: publish task
+    TaskSystem->>PG: persist task + outbox event
+    Relay->>PG: fetch pending outbox rows
+    Relay->>Redis: publish/dispatch event
+    Blackboard->>Redis: consume task event
+    Blackboard->>Worker: assign task
+    Worker-->>Blackboard: result / heartbeat / fail
+    Blackboard->>TaskSystem: update task state
+    TaskSystem->>PG: persist latest state
+```
+
 ### 进化链路
 
 1. 对话结束或任务完成后发出事件
@@ -314,6 +424,333 @@ Mirror 的设计不是“依赖少一个就完全起不来”，而是尽量在�
 3. `CognitionUpdater` / `PersonalityEvolver` / `RelationshipStateMachine` 生成更新
 4. `CoreMemoryScheduler`、图谱、日志等组件持久化结果
 5. 后续对话再自然使用这些更新
+
+```mermaid
+sequenceDiagram
+    participant Runtime as Runtime/Event Bus
+    participant Observer as ObserverEngine
+    participant Reflector as MetaCognitionReflector
+    participant Updater as CognitionUpdater
+    participant Evolver as PersonalityEvolver
+    participant Memory as CoreMemoryScheduler
+    participant Journal as EvolutionJournal
+
+    Runtime->>Observer: dialogue_ended / task_completed
+    Runtime->>Reflector: task_completed / task_failed
+    Observer-->>Updater: extracted signals / lessons
+    Reflector-->>Updater: reflections / lessons
+    Updater->>Evolver: candidate updates
+    Evolver->>Memory: schedule memory updates
+    Updater->>Journal: append evolution entry
+    Evolver->>Journal: append evolution entry
+    Memory-->>Runtime: future conversations consume updated state
+```
+
+## API 示例
+
+下面的示例基于当前接口定义与测试用例整理，适合作为联调参考。
+
+### `POST /chat`
+
+请求：
+
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "帮我规划一下今天的学习安排",
+    "session_id": "session-1",
+    "user_id": "user-1"
+  }'
+```
+
+典型成功响应：
+
+```json
+{
+  "reply": "Task dispatched. Waiting for asynchronous execution.",
+  "session_id": "session-1",
+  "user_id": "user-1",
+  "status": "accepted",
+  "meta": {
+    "task_id": "task-42"
+  }
+}
+```
+
+说明：
+
+- `status=completed` 表示同步完成
+- `status=accepted` 表示已发布异步任务
+- `status=waiting_hitl` 表示正在等待人工反馈
+
+典型失败响应：
+
+```json
+{
+  "error": {
+    "code": "action_routing_failed",
+    "message": "The action router did not produce a reply.",
+    "details": {
+      "session_id": "session-1"
+    }
+  }
+}
+```
+
+### `GET /chat/stream`
+
+请求：
+
+```bash
+curl -N "http://127.0.0.1:8000/chat/stream?session_id=session-1"
+```
+
+典型 SSE 事件流：
+
+```text
+event: delta
+data: {"delta":"hello"}
+
+event: message
+data: {"type":"text","content":"hello world","metadata":{}}
+
+event: done
+data: {"status":"done"}
+```
+
+当流式输出不可用时：
+
+```json
+{
+  "error": {
+    "code": "streaming_unavailable",
+    "message": "Streaming is currently unavailable for this runtime.",
+    "details": {
+      "session_id": "session-1"
+    }
+  }
+}
+```
+
+### `POST /hitl/respond`
+
+请求：
+
+```bash
+curl -X POST http://127.0.0.1:8000/hitl/respond \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task_id": "task-1",
+    "decision": "approve",
+    "payload": {
+      "safe": true
+    }
+  }'
+```
+
+成功响应：
+
+```json
+{
+  "status": "ok",
+  "task_id": "task-1",
+  "decision": "approve"
+}
+```
+
+任务不存在时：
+
+```json
+{
+  "error": {
+    "code": "task_not_found",
+    "message": "No HITL task exists for the provided task_id.",
+    "details": {
+      "task_id": "missing"
+    }
+  }
+}
+```
+
+### `GET /evolution/journal`
+
+请求：
+
+```bash
+curl "http://127.0.0.1:8000/evolution/journal?limit=10&user_id=user-1"
+```
+
+成功响应：
+
+```json
+{
+  "items": [
+    {
+      "id": "entry-1",
+      "user_id": "user-1",
+      "event_type": "lesson_generated",
+      "summary": "Captured a lesson",
+      "details": {
+        "domain": "python"
+      },
+      "created_at": "2026-04-11T10:00:00Z"
+    }
+  ],
+  "count": 1
+}
+```
+
+### `GET /memory`
+
+请求：
+
+```bash
+curl "http://127.0.0.1:8000/memory?user_id=user-1"
+```
+
+成功响应：
+
+```json
+{
+  "items": [
+    {
+      "memory_key": "fact:preferences:short",
+      "content": "User prefers short answers",
+      "truth_type": "fact",
+      "status": "active",
+      "source": "user",
+      "confidence": 1.0,
+      "confirmed_by_user": true,
+      "updated_at": "2026-04-11T10:00:00+00:00",
+      "visibility": "durable"
+    }
+  ],
+  "count": 1
+}
+```
+
+### `GET /memory/governance`
+
+请求：
+
+```bash
+curl "http://127.0.0.1:8000/memory/governance?user_id=user-1"
+```
+
+成功响应：
+
+```json
+{
+  "user_id": "user-1",
+  "blocked_content_classes": [],
+  "retention_days": {
+    "fact": 0,
+    "relationship": 0,
+    "inference": 30,
+    "pending_confirmation": 7,
+    "memory_conflicts": 30,
+    "candidate": 7
+  },
+  "updated_at": "2026-04-11T10:00:00+00:00"
+}
+```
+
+### `POST /memory/governance/block`
+
+请求：
+
+```bash
+curl -X POST http://127.0.0.1:8000/memory/governance/block \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user-1",
+    "content_class": "support_preference",
+    "blocked": true
+  }'
+```
+
+成功响应：
+
+```json
+{
+  "user_id": "user-1",
+  "content_class": "support_preference",
+  "blocked": true,
+  "policy": {
+    "user_id": "user-1",
+    "blocked_content_classes": [
+      "support_preference"
+    ],
+    "retention_days": {
+      "fact": 0,
+      "relationship": 0,
+      "inference": 30,
+      "pending_confirmation": 7,
+      "memory_conflicts": 30,
+      "candidate": 7
+    },
+    "updated_at": "2026-04-11T10:00:00+00:00"
+  }
+}
+```
+
+### `POST /memory/correct`
+
+请求：
+
+```bash
+curl -X POST http://127.0.0.1:8000/memory/correct \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user-1",
+    "memory_key": "inference:tone:direct",
+    "corrected_content": "User prefers careful detailed answers",
+    "truth_type": "fact"
+  }'
+```
+
+成功响应：
+
+```json
+{
+  "status": "ok",
+  "item": {
+    "memory_key": "inference:tone:direct:corrected",
+    "content": "User prefers careful detailed answers",
+    "truth_type": "fact",
+    "status": "active",
+    "source": "user_correction",
+    "confidence": 1.0,
+    "confirmed_by_user": true,
+    "updated_at": "2026-04-11T10:00:00+00:00",
+    "visibility": "durable"
+  }
+}
+```
+
+### `POST /memory/delete`
+
+请求：
+
+```bash
+curl -X POST http://127.0.0.1:8000/memory/delete \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user-1",
+    "memory_key": "fact:tone:direct",
+    "reason": "wrong"
+  }'
+```
+
+成功响应：
+
+```json
+{
+  "status": "ok",
+  "memory_key": "fact:tone:direct"
+}
+```
 
 ## 测试
 
