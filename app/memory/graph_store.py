@@ -38,7 +38,9 @@ class GraphStore:
         self.user = user or settings.neo4j.user
         self.password = password or settings.neo4j.password
         self.database = database or settings.neo4j.database
-        self._driver = AsyncGraphDatabase.driver(self.uri, auth=(self.user, self.password))
+        self._driver = AsyncGraphDatabase.driver(
+            self.uri, auth=(self.user, self.password)
+        )
 
     @staticmethod
     def _validate_relation(relation: str) -> str:
@@ -66,6 +68,7 @@ class GraphStore:
         query = f"""
         MERGE (s:MemoryEntity {{user_id: $user_id, name: $subject}})
         MERGE (o:MemoryEntity {{user_id: $user_id, name: $object}})
+        WITH s, o
         OPTIONAL MATCH (s)-[existing:{relation} {{user_id: $user_id}}]->(o)
         WHERE existing.status = 'active' AND $status = 'active'
         SET existing.status = 'superseded',
@@ -180,7 +183,9 @@ class GraphStore:
         parsed: list[dict[str, Any]] = []
         for record in records:
             payload = dict(record)
-            payload["conflict_with"] = json.loads(payload.pop("conflict_with_json") or "[]")
+            payload["conflict_with"] = json.loads(
+                payload.pop("conflict_with_json") or "[]"
+            )
             payload["metadata"] = json.loads(payload.pop("metadata_json") or "{}")
             parsed.append(payload)
         return parsed
@@ -221,5 +226,7 @@ class GraphStore:
                 subject=subject,
                 object=object,
                 updated_at=datetime.now(timezone.utc).isoformat(),
-                metadata_json=json.dumps({"governance_reason": reason, "deleted_by_user": True}),
+                metadata_json=json.dumps(
+                    {"governance_reason": reason, "deleted_by_user": True}
+                ),
             )

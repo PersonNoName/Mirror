@@ -8,6 +8,7 @@ from typing import Any
 
 from app.evolution.event_bus import Event, EventType
 from app.evolution.helpers import extract_json
+from app.evolution.signal_extractor import SignalExtractor
 from app.providers.openai_compat import ProviderRequestError
 from app.tasks.models import Lesson
 
@@ -66,7 +67,7 @@ class ObserverEngine:
                     content=f'{aligned["subject"]} {aligned["relation"]} {aligned["object"]}',
                     metadata={"confidence": aligned.get("confidence", 0.7)},
                 )
-            lesson = self._triple_to_lesson(last, aligned)
+            lesson = await self._triple_to_lesson(last, aligned)
             if lesson is not None:
                 await self.event_bus.emit(
                     Event(
@@ -123,8 +124,7 @@ class ObserverEngine:
         aligned["relation"] = str(aligned.get("relation", "")).strip().upper()
         return aligned
 
-    @staticmethod
-    def _triple_to_lesson(event: Event, triple: dict[str, Any]) -> Lesson | None:
+    async def _triple_to_lesson(self, event: Event, triple: dict[str, Any]) -> Lesson | None:
         subject = str(triple.get("subject", "")).strip().lower()
         relation = str(triple.get("relation", "")).strip().upper()
         object_value = str(triple.get("object", "")).strip()
@@ -138,25 +138,38 @@ class ObserverEngine:
         preference_relation = relation_map.get(relation)
         if preference_relation is None:
             return None
-        summary = f"User {preference_relation} {object_value}."
-        return Lesson(
-            source_task_id=event.id,
-            user_id=event.payload.get("user_id", ""),
-            domain="explicit_preference",
-            outcome="observed",
-            category="observer_explicit_preference",
-            summary=summary,
-            lesson_text=summary,
-            details={
-                "source": "observer_triple",
-                "session_id": event.payload.get("session_id", ""),
-                "explicit_user_statement": True,
-                "explicit_user_confirmation": True,
-                "preference_relation": preference_relation,
-                "preference_object": object_value,
-            },
-            confidence=float(triple.get("confidence", 0.85)),
+        source_text = str(event.payload.get("text", "")).strip()
+        candidate = SignalExtractor._preference_candidate(preference_relation, object_value)
+        reviewer = SignalExtractor(
+            personality_evolver=None,
+            model_registry=self.model_registry,
+            circuit_breaker=self.circuit_breaker,
         )
+        review = await reviewer.review_preference_candidate(
+            text=source_text,
+            candidate=candidate,
+            default_classification=(
+                "quoted_or_forwarded"
+                if (
+                    SignalExtractor._quoted_or_copied_preference_candidate(source_text) is not None
+                    or SignalExtractor._contains_copy_markers(source_text)
+                )
+                else "self_reported"
+            ),
+        )
+        lesson = SignalExtractor._build_reviewed_preference_lesson(event, candidate=candidate, review=review)
+        lesson.category = (
+            "observer_explicit_preference"
+            if lesson.details.get("explicit_user_statement")
+            else "observer_explicit_preference_review"
+        )
+        lesson.details["source"] = "observer_triple"
+        lesson.confidence = (
+            float(triple.get("confidence", 0.85))
+            if lesson.details.get("explicit_user_statement")
+            else min(float(triple.get("confidence", 0.85)), lesson.confidence)
+        )
+        return lesson
 
     @staticmethod
     def _lesson_payload(lesson: Lesson) -> dict[str, Any]:

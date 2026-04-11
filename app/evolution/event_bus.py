@@ -253,6 +253,17 @@ class RedisStreamsEventBus(EventBus):
             )
             await self.redis_client.xack(stream_name, group_name, delivery_id)
             return
+        if event.type != event_type:
+            logger.info(
+                "event_type_mismatch_skipped",
+                subscribed_event_type=event_type,
+                actual_event_type=event.type,
+                stream_name=stream_name,
+                delivery_id=str(delivery_id),
+                event_id=event.id,
+            )
+            await self.redis_client.xack(stream_name, group_name, delivery_id)
+            return
 
         scope = f"event_consumer:{event_type}"
         if self.idempotency_store is not None:

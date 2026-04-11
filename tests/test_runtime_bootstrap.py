@@ -110,9 +110,18 @@ class StubGentleProactivityService:
 
 
 class StubSignalExtractor:
-    def __init__(self, personality_evolver: object, event_bus: object | None = None) -> None:
+    def __init__(
+        self,
+        personality_evolver: object,
+        event_bus: object | None = None,
+        *,
+        model_registry: object | None = None,
+        circuit_breaker: object | None = None,
+    ) -> None:
         self.personality_evolver = personality_evolver
         self.event_bus = event_bus
+        self.model_registry = model_registry
+        self.circuit_breaker = circuit_breaker
 
     async def handle_dialogue_ended(self, event: object) -> None:
         return None

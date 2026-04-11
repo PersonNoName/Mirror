@@ -508,3 +508,83 @@ async def test_explicit_preference_lesson_is_promoted_to_factual_memory_with_sta
     assert isinstance(stored, FactualMemory)
     assert stored.content == "User likes Python."
     assert stored.memory_key == "fact:explicit_preference:likes:python"
+
+
+@pytest.mark.asyncio
+async def test_reviewed_explicit_preference_requires_confirmation_instead_of_direct_promotion() -> None:
+    core_memory = CoreMemory()
+    scheduler = RecordingScheduler(core_memory)
+    task_store = RecordingTaskStore()
+    blackboard = RecordingBlackboard()
+    updater = CognitionUpdater(
+        core_memory_cache=DummyCoreMemoryCache(core_memory),
+        core_memory_scheduler=scheduler,
+        graph_store=RecordingGraphStore(),
+        task_store=task_store,
+        blackboard=blackboard,
+    )
+
+    await updater._update_world_model(
+        Lesson(
+            user_id="user-1",
+            domain="explicit_preference",
+            summary="User likes Python.",
+            confidence=0.58,
+            details={
+                "preference_relation": "likes",
+                "preference_object": "Python",
+                "explicit_user_statement": False,
+                "explicit_user_confirmation": False,
+                "requires_review": True,
+            },
+        )
+    )
+
+    assert core_memory.world_model.pending_confirmations
+    pending = core_memory.world_model.pending_confirmations[0]
+    assert pending.status == "pending_confirmation"
+    assert pending.confirmed_by_user is False
+    assert pending.memory_key == "inference:explicit_preference:likes:python"
+    assert blackboard.waiting
+
+
+@pytest.mark.asyncio
+async def test_implicit_situational_preference_is_stored_as_short_term_inference_without_confirmation_task() -> None:
+    core_memory = CoreMemory()
+    scheduler = RecordingScheduler(core_memory)
+    task_store = RecordingTaskStore()
+    blackboard = RecordingBlackboard()
+    updater = CognitionUpdater(
+        core_memory_cache=DummyCoreMemoryCache(core_memory),
+        core_memory_scheduler=scheduler,
+        graph_store=RecordingGraphStore(),
+        task_store=task_store,
+        blackboard=blackboard,
+    )
+
+    await updater._update_world_model(
+        Lesson(
+            user_id="user-1",
+            domain="implicit_preference",
+            summary="User may like coffee.",
+            confidence=0.63,
+            details={
+                "preference_relation": "likes",
+                "preference_object": "coffee",
+                "preference_strength": "implicit",
+                "preference_durability": "situational",
+                "speaker_attribution": "self_reported",
+                "memory_tier": "session_hint",
+                "evidence_type": "implicit_expression",
+            },
+        )
+    )
+
+    assert not core_memory.world_model.pending_confirmations
+    assert not blackboard.waiting
+    stored = core_memory.world_model.inferred_memories[0]
+    assert isinstance(stored, InferredMemory)
+    assert stored.content == "User may like coffee."
+    assert stored.memory_key == "inference:implicit_preference:likes:coffee"
+    assert stored.time_horizon == "short_term"
+    assert stored.metadata["memory_tier"] == "session_hint"

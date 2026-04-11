@@ -2,123 +2,190 @@
 
 ## Goal
 
-Store durable user preferences without relying on a single extraction strategy.
+Capture user preferences without letting the agent freely promote every mention into long-term memory.
 
-The implemented design uses three layers:
+The pipeline now separates four memory outcomes:
 
-1. Rule-based extraction for high-confidence explicit statements.
-2. Observer triple extraction for broader phrasing coverage.
-3. Existing memory governance and `CognitionUpdater` write controls for durable storage.
+1. Explicit fact
+2. Inferred preference
+3. Short-term session hint
+4. Review-required candidate
 
-## What Changed
+## Layers
 
-### 1. Rule-based explicit preference capture
+### 1. Explicit rule extraction
 
 File: `app/evolution/signal_extractor.py`
 
-Added a new explicit-preference lesson extractor that emits `lesson_generated` for direct user statements such as:
+High-confidence first-person statements still use rule extraction first.
+
+Examples:
 
 - `I like Python`
-- `I prefer TypeScript`
-- `I use VSCode`
 - `我很喜欢 Python`
-- `我偏好简洁回复`
+- `我主要用 VSCode`
 
-The extractor writes structured lesson details instead of writing memory directly:
+These can become `explicit_preference` lessons and later durable facts.
 
-- `domain=explicit_preference`
-- `details.preference_relation`
-- `details.preference_object`
-- `details.explicit_user_statement=true`
+### 2. Meta-instruction review guard
 
-This keeps extraction and storage decoupled.
+The extractor now treats summary, translation, rewrite, polish, example, log, and quoted-content contexts as review-sensitive evidence.
 
-### 2. Observer triples now bridge into the same lesson pipeline
+Examples:
 
-File: `app/evolution/observer.py`
+- `帮我总结一下下面的话：我喜欢 Python`
+- `translate the following: I like Python`
+- `这是示例文案：我喜欢 Python`
 
-The observer prompt was rewritten into stable English and now asks for:
+This guard runs before long-term promotion so pasted material is less likely to be mistaken for the user's own preference.
 
-- explicit user facts only
-- `subject='user'`
-- allowed durable relations only
-- JSON array output with confidence
+### 3. AI review for attribution
 
-When the observer extracts a durable preference triple such as `user PREFERS Python`, it now emits a matching `lesson_generated` event. This means open-ended model extraction and rule extraction both feed the same governance path.
+When a message is ambiguous, the lightweight reviewer model classifies whether the preference is:
 
-`observation_done` remains available as an audit/debug event, but it is no longer the only artifact produced by observer extraction.
+- `self_reported`
+- `quoted_or_forwarded`
+- `uncertain`
 
-### 3. Durable storage for explicit preference lessons
+This reviewer is a second pass. If it fails, the system falls back to conservative rule-based review.
+
+### 4. AI extraction for implicit preference candidates
+
+When a message is not an explicit preference statement, the system can ask the model for a structured implicit-preference candidate.
+
+Expected output shape:
+
+```json
+{
+  "classification": "self_reported | quoted_or_forwarded | uncertain",
+  "preference_strength": "explicit | implicit | weak | none",
+  "durability": "stable | situational | unknown",
+  "relation": "likes | dislikes | prefers | uses | none",
+  "object": "coffee",
+  "confidence": 0.63,
+  "reason": "short explanation"
+}
+```
+
+Examples:
+
+- `晚上来杯咖啡真惬意啊` -> plausible implicit candidate
+- `今天好想喝点甜的` -> likely situational hint
+- `帮我总结下面的话：我喜欢玩游戏` -> not a direct fact, should stay reviewed or ignored
+
+## Storage Policy
 
 File: `app/evolution/cognition_updater.py`
 
-`CognitionUpdater._classify_memory()` now recognizes `domain="explicit_preference"` and promotes it into durable factual memory with stable keys like:
+### Explicit fact
+
+Conditions:
+
+- explicit statement
+- attributed to the user
+- durable enough to promote
+
+Stored as:
 
 - `fact:explicit_preference:likes:python`
-- `fact:explicit_preference:prefers:typescript`
-- `fact:explicit_preference:uses:vscode`
 
-This means explicit user preference statements can be merged, deduplicated, governed, inspected, corrected, and deleted through the existing memory governance APIs.
+### Review-required candidate
 
-### 4. Foreground prompt safety
+Conditions:
 
-File: `app/soul/engine.py`
+- quoted, copied, forwarded, or ambiguous attribution
 
-Added a prompt constraint:
+Stored as:
 
-- do not claim the system stored or remembered a new user fact unless it already appears in the supplied world model
+- pending confirmation
+- inference memory key
 
-This reduces false claims like "I remembered that" when the write path has not completed.
+Example:
 
-## Current Flow
+- `inference:explicit_preference:likes:python`
 
-### Explicit rule match
+### Inferred preference
 
-User says `I like Python`
--> `SignalExtractor`
--> `lesson_generated`
--> `CognitionUpdater`
--> governed factual memory write
+Conditions:
 
-### Observer match
+- plausible preference signal
+- not explicit enough to be a fact
 
-User says something less templated but still explicit
--> `ObserverEngine`
--> extracted triple
--> `lesson_generated`
--> `CognitionUpdater`
--> governed memory write
+Stored as `InferredMemory`.
+
+### Short-term session hint
+
+Conditions:
+
+- implicit preference
+- situational rather than stable
+
+Stored as an inferred memory with:
+
+- `time_horizon="short_term"`
+- `metadata.memory_tier="session_hint"`
+
+This avoids creating a HITL confirmation task for every soft preference cue while still preserving a bounded hint.
+
+Example:
+
+- `inference:implicit_preference:likes:coffee`
+
+## Example Outcomes
+
+### Direct preference
+
+`我喜欢 Python`
+
+Outcome:
+
+- explicit fact
+
+### Copied preference text
+
+`下面是我复制的一段话：“我喜欢 Python”`
+
+Outcome:
+
+- review-required candidate
+- no direct fact promotion
+
+### Situational implicit preference
+
+`晚上来杯咖啡真惬意啊`
+
+Outcome:
+
+- implicit preference candidate
+- stored as short-term inferred hint, not a fact
+
+### Summary request over supplied content
+
+`帮我总结一下下面的话：我比较喜欢玩游戏`
+
+Outcome:
+
+- review-sensitive context
+- should not be promoted as the user's durable preference by default
+
+## Why This Is Better Than Keyword Growth
+
+- Rules still cover high-precision explicit statements.
+- AI handles open phrasing and indirect language.
+- Governance decides storage tier instead of the extractor making a permanent decision.
+- Situational expressions are no longer forced into the same bucket as durable preferences.
 
 ## Verification
 
-Relevant tests added or updated:
+Relevant tests:
 
 - `tests/test_emotional_support_policy.py`
 - `tests/test_relationship_memory.py`
 - `tests/test_observer_preferences.py`
+- `tests/test_runtime_bootstrap.py`
 
-Verified with:
+Suggested command:
 
 ```powershell
-pytest tests\test_emotional_support_policy.py tests\test_relationship_memory.py tests\test_observer_preferences.py -q
+pytest tests\test_emotional_support_policy.py tests\test_relationship_memory.py tests\test_observer_preferences.py tests\test_runtime_bootstrap.py -q
 ```
-
-Result:
-
-- `19 passed`
-
-## Known Limits
-
-- The running `uvicorn` process must be restarted or hot-reloaded before live HTTP traffic uses these changes.
-- The observer path still depends on the configured extraction model being reachable.
-- The rule extractor currently focuses on explicit first-person statements. More implicit preference phrasing can still be added later.
-
-## Recommended Next Steps
-
-1. Restart the running app process so the live runtime loads the new extractor and updater code.
-2. Add journal records for accepted preference-memory writes if you want the `/evolution/journal` endpoint to show successful preference promotions directly.
-3. Expand preference categories over time, for example:
-   - preferred languages
-   - preferred tooling
-   - communication preferences
-   - workflow habits

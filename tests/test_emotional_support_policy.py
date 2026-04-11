@@ -8,6 +8,7 @@ from app.memory import CoreMemory, FactualMemory
 from app.soul import SoulEngine
 
 from tests.conftest import (
+    DummyChatModel,
     DummyCoreMemoryCache,
     DummyModelRegistry,
     DummySessionContextStore,
@@ -109,7 +110,7 @@ async def test_signal_extractor_emits_proactivity_preference_lesson_for_explicit
 
 
 @pytest.mark.asyncio
-async def test_signal_extractor_emits_explicit_preference_lesson_for_python_like_statement() -> None:
+async def test_signal_extractor_emits_explicit_preference_lesson_for_chinese_python_like_statement() -> None:
     personality_evolver = RecordingPersonalityEvolver()
     event_bus = RecordingEventBus()
     extractor = SignalExtractor(personality_evolver=personality_evolver, event_bus=event_bus)
@@ -120,8 +121,8 @@ async def test_signal_extractor_emits_explicit_preference_lesson_for_python_like
             payload={
                 "user_id": "user-1",
                 "session_id": "session-2",
-                "text": "我很喜欢python",
-                "reply": "收到",
+                "text": "\u6211\u5f88\u559c\u6b22python",
+                "reply": "\u6536\u5230",
             },
         )
     )
@@ -132,6 +133,163 @@ async def test_signal_extractor_emits_explicit_preference_lesson_for_python_like
     assert explicit["details"]["preference_relation"] == "likes"
     assert explicit["details"]["preference_object"] == "Python"
     assert explicit["details"]["explicit_user_statement"] is True
+
+
+@pytest.mark.asyncio
+async def test_signal_extractor_routes_quoted_preference_to_review_instead_of_direct_fact() -> None:
+    personality_evolver = RecordingPersonalityEvolver()
+    event_bus = RecordingEventBus()
+    extractor = SignalExtractor(personality_evolver=personality_evolver, event_bus=event_bus)
+
+    await extractor.handle_dialogue_ended(
+        Event(
+            type="dialogue_ended",
+            payload={
+                "user_id": "user-1",
+                "session_id": "session-3",
+                "text": "\u4e0b\u9762\u662f\u6211\u590d\u5236\u7684\u4e00\u6bb5\u8bdd\uff1a\u201c\u6211\u559c\u6b22Python\u201d",
+                "reply": "ok",
+            },
+        )
+    )
+
+    lessons = [event.payload["lesson"] for event in event_bus.events]
+    explicit = next(item for item in lessons if item["domain"] == "explicit_preference")
+    assert explicit["summary"] == "User likes Python."
+    assert explicit["details"]["explicit_user_statement"] is False
+    assert explicit["details"]["explicit_user_confirmation"] is False
+    assert explicit["details"]["requires_review"] is True
+    assert explicit["details"]["review_reason"] == "quoted_or_copied_content"
+
+
+@pytest.mark.asyncio
+async def test_signal_extractor_uses_ai_reviewer_to_restore_self_reported_preference_when_context_says_quote_is_own_view() -> None:
+    personality_evolver = RecordingPersonalityEvolver()
+    event_bus = RecordingEventBus()
+    extractor = SignalExtractor(
+        personality_evolver=personality_evolver,
+        event_bus=event_bus,
+        model_registry=DummyModelRegistry(
+            chat_model=DummyChatModel(
+                response='{"classification":"self_reported","confidence":0.88,"reason":"user says the quoted sentence is also their own preference"}'
+            )
+        ),
+    )
+
+    await extractor.handle_dialogue_ended(
+        Event(
+            type="dialogue_ended",
+            payload={
+                "user_id": "user-1",
+                "session_id": "session-4",
+                "text": '\u6211\u628a\u8fd9\u53e5\u8bdd\u590d\u5236\u7ed9\u4f60\uff0c\u4f46\u8fd9\u4e5f\u662f\u6211\u81ea\u5df1\u7684\u60f3\u6cd5\uff1a"\u6211\u559c\u6b22Python"',
+                "reply": "ok",
+            },
+        )
+    )
+
+    lessons = [event.payload["lesson"] for event in event_bus.events]
+    explicit = next(item for item in lessons if item["domain"] == "explicit_preference")
+    assert explicit["details"]["explicit_user_statement"] is True
+    assert explicit["details"]["review_source"] == "llm_reviewer"
+    assert explicit["details"]["review_classification"] == "self_reported"
+    assert explicit["confidence"] == pytest.approx(0.88)
+
+
+@pytest.mark.asyncio
+async def test_signal_extractor_uses_ai_reviewer_to_keep_ambiguous_copy_as_review() -> None:
+    personality_evolver = RecordingPersonalityEvolver()
+    event_bus = RecordingEventBus()
+    extractor = SignalExtractor(
+        personality_evolver=personality_evolver,
+        event_bus=event_bus,
+        model_registry=DummyModelRegistry(
+            chat_model=DummyChatModel(
+                response='{"classification":"uncertain","confidence":0.41,"reason":"message may be a pasted example"}'
+            )
+        ),
+    )
+
+    await extractor.handle_dialogue_ended(
+        Event(
+            type="dialogue_ended",
+            payload={
+                "user_id": "user-1",
+                "session_id": "session-5",
+                "text": "\u6211\u590d\u5236\u4e00\u53e5\u8bdd\u7ed9\u4f60\uff1a\u201c\u6211\u559c\u6b22Python\u201d",
+                "reply": "ok",
+            },
+        )
+    )
+
+    lessons = [event.payload["lesson"] for event in event_bus.events]
+    explicit = next(item for item in lessons if item["domain"] == "explicit_preference")
+    assert explicit["details"]["explicit_user_statement"] is False
+    assert explicit["details"]["review_reason"] == "ambiguous_preference_evidence"
+    assert explicit["details"]["review_source"] == "llm_reviewer"
+    assert explicit["confidence"] == pytest.approx(0.41)
+
+
+@pytest.mark.asyncio
+async def test_signal_extractor_treats_summary_request_as_reviewable_preference_evidence_without_ai() -> None:
+    personality_evolver = RecordingPersonalityEvolver()
+    event_bus = RecordingEventBus()
+    extractor = SignalExtractor(personality_evolver=personality_evolver, event_bus=event_bus)
+
+    await extractor.handle_dialogue_ended(
+        Event(
+            type="dialogue_ended",
+            payload={
+                "user_id": "user-1",
+                "session_id": "session-6",
+                "text": "\u5e2e\u6211\u603b\u7ed3\u4e00\u4e0b\u4e0b\u9762\u7684\u8bdd\uff1a\u6211\u559c\u6b22Python",
+                "reply": "ok",
+            },
+        )
+    )
+
+    lessons = [event.payload["lesson"] for event in event_bus.events]
+    explicit = next(item for item in lessons if item["domain"] == "explicit_preference")
+    assert explicit["details"]["explicit_user_statement"] is False
+    assert explicit["details"]["requires_review"] is True
+    assert explicit["details"]["review_source"] == "rule_fallback"
+    assert explicit["details"]["review_reason"] == "quoted_or_copied_content"
+
+
+@pytest.mark.asyncio
+async def test_signal_extractor_extracts_implicit_preference_candidate_for_situational_coffee_statement() -> None:
+    personality_evolver = RecordingPersonalityEvolver()
+    event_bus = RecordingEventBus()
+    extractor = SignalExtractor(
+        personality_evolver=personality_evolver,
+        event_bus=event_bus,
+        model_registry=DummyModelRegistry(
+            chat_model=DummyChatModel(
+                response='{"classification":"self_reported","preference_strength":"implicit","durability":"situational","relation":"likes","object":"coffee","confidence":0.63,"reason":"the user expresses enjoyment of coffee in a situation"}'
+            )
+        ),
+    )
+
+    await extractor.handle_dialogue_ended(
+        Event(
+            type="dialogue_ended",
+            payload={
+                "user_id": "user-1",
+                "session_id": "session-7",
+                "text": "\u665a\u4e0a\u6765\u676f\u5496\u5561\u771f\u60ec\u610f\u554a",
+                "reply": "ok",
+            },
+        )
+    )
+
+    lessons = [event.payload["lesson"] for event in event_bus.events]
+    implicit = next(item for item in lessons if item["domain"] == "implicit_preference")
+    assert implicit["summary"] == "User may like coffee."
+    assert implicit["details"]["preference_strength"] == "implicit"
+    assert implicit["details"]["preference_durability"] == "situational"
+    assert implicit["details"]["speaker_attribution"] == "self_reported"
+    assert implicit["details"]["memory_tier"] == "session_hint"
+    assert implicit["confidence"] == pytest.approx(0.63)
 
 
 def test_support_policy_uses_stored_problem_solving_preference_when_current_turn_is_ambiguous() -> None:

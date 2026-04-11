@@ -155,6 +155,35 @@ async def test_event_bus_duplicate_message_is_acked_without_processing() -> None
 
 
 @pytest.mark.asyncio
+async def test_event_bus_acks_mismatched_event_type_without_invoking_handler() -> None:
+    redis = RecordingRedisClient()
+    idempotency = RecordingIdempotencyStore()
+    bus = RedisStreamsEventBus(redis_client=redis, outbox_store=object(), idempotency_store=idempotency)
+    handled: list[str] = []
+
+    async def handler(event: Event) -> None:
+        handled.append(event.id)
+
+    await bus.subscribe("lesson_generated", handler)
+    fields = {
+        "payload": '{"event":{"id":"evt-observation","type":"observation_done","payload":{"triples":[]}}}'
+    }
+
+    await bus._handle_message(
+        "lesson_generated",
+        "stream:event:evolution",
+        "group:event:lesson_generated",
+        "3-0",
+        fields,
+    )
+
+    assert handled == []
+    assert idempotency.claims == []
+    assert idempotency.done == []
+    assert redis.acks == [("stream:event:evolution", "group:event:lesson_generated", "3-0")]
+
+
+@pytest.mark.asyncio
 async def test_outbox_relay_does_not_mark_published_without_redis(monkeypatch: pytest.MonkeyPatch) -> None:
     event = SimpleNamespace(id="evt-1", topic="stream:test", payload={}, retry_count=0)
     store = RecordingOutboxStore(events=[event])

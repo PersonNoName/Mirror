@@ -477,6 +477,46 @@ class CognitionUpdater:
                 },
             )
 
+        if (
+            lesson.domain == "implicit_preference"
+            and preference_relation in {"likes", "dislikes", "prefers", "uses"}
+            and preference_object
+        ):
+            durability = str(lesson.details.get("preference_durability", "unknown")).strip()
+            strength = str(lesson.details.get("preference_strength", "implicit")).strip()
+            memory_tier = str(lesson.details.get("memory_tier", "inference_candidate")).strip()
+            implicit_content = content or self._implicit_preference_summary(
+                preference_relation, preference_object
+            )
+            return InferredMemory(
+                content=implicit_content,
+                source=source,
+                confidence=min(max(confidence, 0.55), 0.74),
+                updated_at=updated_at,
+                confirmed_by_user=False,
+                time_horizon="short_term" if durability == "situational" else "medium_term",
+                status="active",
+                sensitivity=sensitivity,
+                memory_key=self._implicit_preference_memory_key(
+                    preference_relation, preference_object
+                ),
+                metadata={
+                    "lesson_id": lesson.id,
+                    "category": lesson.category,
+                    "preference_relation": preference_relation,
+                    "preference_object": preference_object,
+                    "preference_durability": durability,
+                    "preference_strength": strength,
+                    "memory_tier": memory_tier,
+                    "speaker_attribution": str(
+                        lesson.details.get("speaker_attribution", "uncertain")
+                    ),
+                    "evidence_type": str(
+                        lesson.details.get("evidence_type", "implicit_expression")
+                    ),
+                },
+            )
+
         if lesson.domain == "support_preference" and support_preference in {
             "listening",
             "problem_solving",
@@ -607,6 +647,8 @@ class CognitionUpdater:
 
     def _requires_confirmation(self, candidate: DurableMemory) -> bool:
         if str(candidate.memory_key).startswith("support_preference:"):
+            return False
+        if candidate.metadata.get("memory_tier") == "session_hint":
             return False
         return (
             candidate.sensitivity == "sensitive"
@@ -802,4 +844,21 @@ class CognitionUpdater:
             "prefers": "prefers",
             "uses": "uses",
         }.get(relation, relation)
+        return f"User {verb} {object_value}."
+
+    @staticmethod
+    def _implicit_preference_memory_key(relation: str, object_value: str) -> str:
+        normalized_object = (
+            object_value.strip().lower().replace(" ", "_").replace("/", "_")
+        )
+        return f"inference:implicit_preference:{relation}:{normalized_object}"
+
+    @staticmethod
+    def _implicit_preference_summary(relation: str, object_value: str) -> str:
+        verb = {
+            "likes": "may like",
+            "dislikes": "may dislike",
+            "prefers": "may prefer",
+            "uses": "may often use",
+        }.get(relation, f"may {relation}")
         return f"User {verb} {object_value}."

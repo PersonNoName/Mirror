@@ -330,7 +330,12 @@ async def bootstrap_runtime() -> RuntimeContext:
         if evolution_candidate_manager is not None
         else None
     )
-    signal_extractor = SignalExtractor(personality_evolver=personality_evolver, event_bus=event_bus)
+    signal_extractor = SignalExtractor(
+        personality_evolver=personality_evolver,
+        event_bus=event_bus,
+        model_registry=model_registry,
+        circuit_breaker=circuit_breaker,
+    )
     observer = ObserverEngine(
         model_registry=model_registry,
         graph_store=graph_store,
