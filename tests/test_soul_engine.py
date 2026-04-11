@@ -188,6 +188,15 @@ def test_soul_engine_build_prompt_formats_memory_blocks_for_model_usefulness() -
             memory_key="support_preference:listening",
         )
     )
+    core_memory.world_model.confirmed_facts.append(
+        FactualMemory(
+            content="User explicitly allows gentle follow-up on important topics.",
+            source="dialogue_signal",
+            confidence=0.92,
+            confirmed_by_user=True,
+            memory_key="proactivity_preference:allow",
+        )
+    )
     core_memory.world_model.relationship_history.append(
         RelationshipMemory(
             content="user PREFERS concise responses",
@@ -296,6 +305,8 @@ def test_soul_engine_build_prompt_formats_memory_blocks_for_model_usefulness() -
     assert "- stage=repair_and_recovery" in prompt
     assert "- repair_needed=true" in prompt
     assert "Reduce assertive memory claims and avoid overfamiliar phrasing." in prompt
+    assert "Proactivity Policy" in prompt
+    assert "- stored_preference=allow" in prompt
     assert "Emotional Context" in prompt
     assert "- emotion_class=overwhelm" in prompt
     assert "Support Policy" in prompt
@@ -306,6 +317,7 @@ def test_soul_engine_build_prompt_formats_memory_blocks_for_model_usefulness() -
     assert "Confirmed Facts:" in prompt
     assert "[fact|confirmed|confidence=1.00|source=system] No direct shell outside workspace" in prompt
     assert "[support_preference|fact|confirmed|confidence=0.95|source=dialogue_signal] User prefers listening-first support" in prompt
+    assert "[proactivity_preference|fact|confirmed|confidence=0.92|source=dialogue_signal] User explicitly allows gentle follow-up on important topics." in prompt
     assert "Inferred Memory:" in prompt
     assert "User prefers direct, concise answers" in prompt
     assert "Relationship History:" in prompt

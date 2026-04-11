@@ -20,6 +20,7 @@ from app.evolution import (
     EvolutionCandidateManager,
     EvolutionJournal,
     EvolutionScheduler,
+    GentleProactivityService,
     MetaCognitionReflector,
     ObserverEngine,
     PersonalityEvolver,
@@ -87,6 +88,7 @@ class RuntimeContext:
     evolution_journal: EvolutionJournal
     evolution_candidate_manager: EvolutionCandidateManager | None
     relationship_state_machine: RelationshipStateMachine | None
+    proactivity_service: GentleProactivityService
     memory_governance_service: MemoryGovernanceService
     personality_evolver: PersonalityEvolver
     observer: ObserverEngine
@@ -188,6 +190,7 @@ class RuntimeContext:
                 "memory_governance_degraded": self.memory_governance_service.degraded,
                 "status": "degraded" if self.memory_governance_service.degraded else "ok",
             },
+            "gentle_proactivity": self.proactivity_service.summary(),
         }
         if "status" not in subsystems["evolution_pipeline"]:
             subsystems["evolution_pipeline"]["status"] = (
@@ -290,6 +293,11 @@ async def bootstrap_runtime() -> RuntimeContext:
         candidate_manager=evolution_candidate_manager,
         evolution_journal=evolution_journal,
     )
+    proactivity_service = GentleProactivityService(
+        core_memory_cache=core_memory_cache,
+        core_memory_scheduler=None,
+        evolution_journal=evolution_journal,
+    )
     core_memory_scheduler = CoreMemoryScheduler(
         core_memory_store=core_memory_store,
         core_memory_cache=core_memory_cache,
@@ -299,6 +307,7 @@ async def bootstrap_runtime() -> RuntimeContext:
         circuit_breaker=circuit_breaker,
     )
     memory_governance_service.core_memory_scheduler = core_memory_scheduler
+    proactivity_service.core_memory_scheduler = core_memory_scheduler
     snapshot_store = PersonalitySnapshotStore()
     personality_evolver = PersonalityEvolver(
         session_context_store=session_context_store,
@@ -359,6 +368,7 @@ async def bootstrap_runtime() -> RuntimeContext:
         vector_retriever=vector_retriever,
         tool_registry=tool_registry,
         hook_registry=hook_registry,
+        proactivity_service=proactivity_service,
     )
     action_router = ActionRouter(
         platform_adapter=web_platform,
@@ -371,6 +381,7 @@ async def bootstrap_runtime() -> RuntimeContext:
 
     await event_bus.subscribe("dialogue_ended", observer.handle_dialogue_ended)
     await event_bus.subscribe("dialogue_ended", signal_extractor.handle_dialogue_ended)
+    await event_bus.subscribe("dialogue_ended", proactivity_service.handle_dialogue_ended)
     await event_bus.subscribe("task_completed", reflector.handle_task_completed)
     await event_bus.subscribe("task_failed", reflector.handle_task_failed)
     await event_bus.subscribe("lesson_generated", cognition_updater.handle_lesson_generated)
@@ -432,6 +443,7 @@ async def bootstrap_runtime() -> RuntimeContext:
         evolution_journal=evolution_journal,
         evolution_candidate_manager=evolution_candidate_manager,
         relationship_state_machine=relationship_state_machine,
+        proactivity_service=proactivity_service,
         memory_governance_service=memory_governance_service,
         personality_evolver=personality_evolver,
         observer=observer,

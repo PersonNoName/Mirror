@@ -203,6 +203,14 @@ def test_runtime_health_snapshot_includes_observability_fields() -> None:
             }
         ),
         relationship_state_machine=SimpleNamespace(degraded=False),
+        proactivity_service=SimpleNamespace(
+            degraded=False,
+            summary=lambda: {
+                "gentle_proactivity_enabled": True,
+                "gentle_proactivity_degraded": False,
+                "status": "ok",
+            },
+        ),
         memory_governance_service=SimpleNamespace(degraded=False),
         personality_evolver=SimpleNamespace(),
         observer=SimpleNamespace(),
@@ -236,4 +244,5 @@ def test_runtime_health_snapshot_includes_observability_fields() -> None:
     assert health["subsystems"]["mcp_loader"]["failed_count"] == 2
     assert health["subsystems"]["evolution_pipeline"]["pending_candidate_count"] == 1
     assert health["subsystems"]["relationship_stage"]["relationship_stage_enabled"] is True
+    assert health["subsystems"]["gentle_proactivity"]["gentle_proactivity_enabled"] is True
     assert health["subsystems"]["memory_governance"]["memory_governance_enabled"] is True

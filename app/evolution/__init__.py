@@ -15,6 +15,7 @@ from app.evolution.event_bus import Event, EventBus, EventType, EvolutionEntry, 
 from app.evolution.evolution_journal import EvolutionJournal
 from app.evolution.observer import ObserverEngine
 from app.evolution.personality_evolver import PersonalityEvolver
+from app.evolution.proactivity import GentleProactivityService, ProactivityDecision
 from app.evolution.relationship_state_machine import RelationshipStateMachine
 from app.evolution.reflector import MetaCognitionReflector
 from app.evolution.runtime_bus import InMemoryEventBus
@@ -41,6 +42,8 @@ __all__ = [
     "MetaCognitionReflector",
     "ObserverEngine",
     "PersonalityEvolver",
+    "GentleProactivityService",
+    "ProactivityDecision",
     "RelationshipStateMachine",
     "RedisStreamsEventBus",
     "SignalExtractor",

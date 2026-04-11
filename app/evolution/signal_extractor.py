@@ -20,14 +20,20 @@ class SignalExtractor:
         signal = self._extract_signal(event, text)
         if signal is not None:
             await self.personality_evolver.fast_adapt(signal)
-        lesson = self._extract_support_preference_lesson(event)
-        if lesson is not None and self.event_bus is not None:
-            await self.event_bus.emit(
-                Event(
-                    type=EventType.LESSON_GENERATED,
-                    payload={"lesson": self._lesson_payload(lesson)},
+        lessons = [
+            self._extract_support_preference_lesson(event),
+            self._extract_proactivity_preference_lesson(event),
+        ]
+        if self.event_bus is not None:
+            for lesson in lessons:
+                if lesson is None:
+                    continue
+                await self.event_bus.emit(
+                    Event(
+                        type=EventType.LESSON_GENERATED,
+                        payload={"lesson": self._lesson_payload(lesson)},
+                    )
                 )
-            )
 
     def _extract_signal(self, event: Event, text: str) -> InteractionSignal | None:
         content = None
@@ -105,6 +111,58 @@ class SignalExtractor:
             return "listening"
         if any(token in text for token in problem_tokens):
             return "problem_solving"
+        return "unknown"
+
+    @staticmethod
+    def _extract_proactivity_preference_lesson(event: Event) -> Lesson | None:
+        text = str(event.payload.get("text", "")).lower()
+        preference = SignalExtractor._explicit_proactivity_preference(text)
+        if preference == "unknown":
+            return None
+        summary = (
+            "User explicitly allows gentle follow-up on important topics."
+            if preference == "allow"
+            else "User explicitly does not want proactive follow-up or reminders."
+        )
+        return Lesson(
+            source_task_id=event.id,
+            user_id=event.payload.get("user_id", ""),
+            domain="proactivity_preference",
+            outcome="observed",
+            category="dialogue_proactivity_preference",
+            summary=summary,
+            lesson_text=summary,
+            details={
+                "source": "dialogue_signal",
+                "session_id": event.payload.get("session_id", ""),
+                "explicit_user_statement": True,
+                "explicit_user_confirmation": True,
+                "proactivity_preference": preference,
+            },
+            confidence=0.95,
+        )
+
+    @staticmethod
+    def _explicit_proactivity_preference(text: str) -> str:
+        allow_tokens = (
+            "check in later",
+            "follow up later",
+            "feel free to check in",
+            "ask me about it later",
+            "you can remind me later",
+        )
+        suppress_tokens = (
+            "don't remind me",
+            "do not remind me",
+            "don't follow up",
+            "do not follow up",
+            "don't check in",
+            "no reminders",
+        )
+        if any(token in text for token in suppress_tokens):
+            return "suppress"
+        if any(token in text for token in allow_tokens):
+            return "allow"
         return "unknown"
 
     @staticmethod

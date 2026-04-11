@@ -113,6 +113,39 @@ async def test_core_memory_store_round_trips_relationship_stage_snapshot() -> No
 
 
 @pytest.mark.asyncio
+async def test_core_memory_store_round_trips_proactivity_snapshot_defaults() -> None:
+    snapshot = {
+        "world_model": {
+            "proactivity_policy": {
+                "enabled": True,
+                "min_interval_hours": 72,
+                "same_topic_cooldown_hours": 168,
+                "max_followups_per_14_days": 2,
+                "updated_at": "2026-04-11T00:00:00+00:00",
+            },
+            "proactivity_state": {
+                "last_user_message_at": "2026-04-11T01:00:00+00:00",
+                "latest_preference_override": "allow",
+                "pending_opportunities": [
+                    {
+                        "topic_key": "interview:tomorrow",
+                        "summary": "I have a big interview tomorrow.",
+                        "importance": "high",
+                        "status": "pending",
+                    }
+                ],
+            },
+        }
+    }
+
+    core_memory = _core_memory_from_dict(snapshot)
+
+    assert core_memory.world_model.proactivity_policy.min_interval_hours == 72
+    assert core_memory.world_model.proactivity_state.latest_preference_override == "allow"
+    assert core_memory.world_model.proactivity_state.pending_opportunities[0].topic_key == "interview:tomorrow"
+
+
+@pytest.mark.asyncio
 async def test_cognition_updater_classifies_explicit_user_statement_as_factual_memory() -> None:
     core_memory = CoreMemory()
     scheduler = RecordingScheduler(core_memory)
@@ -382,3 +415,47 @@ async def test_support_preference_lesson_uses_stable_support_memory_key() -> Non
 
     assert scheduler.calls
     assert core_memory.world_model.confirmed_facts[0].memory_key == "support_preference:listening"
+
+
+@pytest.mark.asyncio
+async def test_proactivity_preference_lesson_uses_stable_memory_key() -> None:
+    core_memory = CoreMemory()
+    scheduler = RecordingScheduler(core_memory)
+    candidate_manager = EvolutionCandidateManager(EvolutionJournal())
+    updater = CognitionUpdater(
+        core_memory_cache=DummyCoreMemoryCache(core_memory),
+        core_memory_scheduler=scheduler,
+        graph_store=RecordingGraphStore(),
+        candidate_manager=candidate_manager,
+    )
+    lesson = Lesson(
+        user_id="user-1",
+        domain="proactivity_preference",
+        summary="User explicitly does not want proactive follow-up or reminders.",
+        confidence=0.95,
+        details={
+            "proactivity_preference": "suppress",
+            "explicit_user_statement": True,
+            "explicit_user_confirmation": True,
+            "session_id": "session-a",
+        },
+    )
+
+    await updater._update_world_model(lesson)
+    await updater._update_world_model(
+        Lesson(
+            user_id="user-1",
+            domain="proactivity_preference",
+            summary="User explicitly does not want proactive follow-up or reminders.",
+            confidence=0.95,
+            details={
+                "proactivity_preference": "suppress",
+                "explicit_user_statement": True,
+                "explicit_user_confirmation": True,
+                "session_id": "session-b",
+            },
+        )
+    )
+
+    assert scheduler.calls
+    assert core_memory.world_model.confirmed_facts[0].memory_key == "proactivity_preference:suppress"

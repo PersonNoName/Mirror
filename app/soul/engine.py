@@ -41,6 +41,9 @@ You are a direct collaborator, not a submissive assistant.
 ## Relationship Stage
 {relationship_stage}
 
+## Proactivity Policy
+{proactivity_policy}
+
 ## Emotional Context
 {emotional_context}
 
@@ -67,6 +70,7 @@ You are a direct collaborator, not a submissive assistant.
 - In blended mode, acknowledge feelings first, then offer a small number of optional next steps.
 - Stored support preferences are hints only; current explicit user intent takes precedence.
 - In safety-constrained mode, avoid tool/task escalation and keep advice conservative.
+- Any proactive follow-up must stay low-frequency, reference prior context conservatively, and avoid repetitive reminder phrasing.
 - Think before acting. Every action must follow the required output format.
 
 ## Output Format
@@ -93,6 +97,7 @@ class SoulEngine:
         vector_retriever: VectorRetriever | None,
         tool_registry: Any,
         hook_registry: HookRegistry | None = None,
+        proactivity_service: Any | None = None,
     ) -> None:
         self.model_registry = model_registry
         self.core_memory_cache = core_memory_cache
@@ -100,6 +105,7 @@ class SoulEngine:
         self.vector_retriever = vector_retriever
         self.tool_registry = tool_registry
         self.hook_registry = hook_registry
+        self.proactivity_service = proactivity_service
 
     async def run(self, message: InboundMessage) -> Action:
         """Reason about an inbound message and produce a structured action."""
@@ -239,6 +245,7 @@ class SoulEngine:
                     stable_identity=self._format_stable_identity(core_memory, behavioral_rules),
                     relationship_style=self._format_relationship_style(core_memory),
                     relationship_stage=self._format_relationship_stage(core_memory.world_model),
+                    proactivity_policy=self._format_proactivity_policy(core_memory),
                     emotional_context=self._format_emotional_context(emotional_context),
                     support_policy=self._format_support_policy(support_policy),
                     session_adaptations=(
@@ -383,6 +390,39 @@ class SoulEngine:
             ]
         )
 
+    def _format_proactivity_policy(self, core_memory: CoreMemory) -> str:
+        if self.proactivity_service is not None:
+            snapshot = self.proactivity_service.prompt_policy_snapshot(core_memory)
+            return "\n".join(
+                [
+                    f"- enabled={str(snapshot.get('enabled', True)).lower()}",
+                    f"- stored_preference={snapshot.get('stored_preference', 'unknown')}",
+                    f"- pending_followup_count={snapshot.get('pending_followup_count', 0)}",
+                    f"- last_proactive_at={snapshot.get('last_proactive_at', 'never')}",
+                    f"- last_suppression_reason={snapshot.get('last_suppression_reason', 'none')}",
+                    f"- policy_hint={snapshot.get('policy_hint', 'Only follow up when context is important and bounded.')}",
+                ]
+            )
+        stored_preference = "unknown"
+        for entry in core_memory.world_model.confirmed_facts + core_memory.world_model.inferred_memories:
+            key = str(getattr(entry, "memory_key", ""))
+            if not key.startswith("proactivity_preference:"):
+                continue
+            _, _, preference = key.partition(":")
+            if preference in {"allow", "suppress"}:
+                stored_preference = preference
+                break
+        return "\n".join(
+            [
+                "- enabled=true",
+                f"- stored_preference={stored_preference}",
+                "- pending_followup_count=0",
+                "- last_proactive_at=never",
+                "- last_suppression_reason=none",
+                "- policy_hint=Only follow up when context is important and bounded.",
+            ]
+        )
+
     @staticmethod
     def _format_durable_entries(entries: list[DurableMemory], empty_text: str) -> str:
         lines = []
@@ -394,6 +434,10 @@ class SoulEngine:
             if str(entry.memory_key).startswith("support_preference:"):
                 lines.append(
                     f"- [support_preference|{entry.truth_type}|{status}|confidence={entry.confidence:.2f}|source={entry.source}] {content}"
+                )
+            elif str(entry.memory_key).startswith("proactivity_preference:"):
+                lines.append(
+                    f"- [proactivity_preference|{entry.truth_type}|{status}|confidence={entry.confidence:.2f}|source={entry.source}] {content}"
                 )
             else:
                 lines.append(

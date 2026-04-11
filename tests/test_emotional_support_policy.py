@@ -84,6 +84,30 @@ async def test_signal_extractor_emits_support_preference_lesson_for_explicit_lis
     assert lesson["details"]["explicit_user_statement"] is True
 
 
+@pytest.mark.asyncio
+async def test_signal_extractor_emits_proactivity_preference_lesson_for_explicit_suppression() -> None:
+    personality_evolver = RecordingPersonalityEvolver()
+    event_bus = RecordingEventBus()
+    extractor = SignalExtractor(personality_evolver=personality_evolver, event_bus=event_bus)
+
+    await extractor.handle_dialogue_ended(
+        Event(
+            type="dialogue_ended",
+            payload={
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "text": "Please don't follow up on this later and don't remind me",
+                "reply": "Understood",
+            },
+        )
+    )
+
+    lessons = [event.payload["lesson"] for event in event_bus.events]
+    proactivity = next(item for item in lessons if item["domain"] == "proactivity_preference")
+    assert proactivity["details"]["proactivity_preference"] == "suppress"
+    assert proactivity["details"]["explicit_user_statement"] is True
+
+
 def test_support_policy_uses_stored_problem_solving_preference_when_current_turn_is_ambiguous() -> None:
     core_memory = CoreMemory()
     core_memory.world_model.confirmed_facts.append(

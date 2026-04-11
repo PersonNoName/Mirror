@@ -339,6 +339,7 @@ class CognitionUpdater:
         sensitivity = "sensitive" if lesson.details.get("sensitive") else "normal"
         updated_at = utc_now_iso()
         support_preference = str(lesson.details.get("support_preference", "")).strip()
+        proactivity_preference = str(lesson.details.get("proactivity_preference", "")).strip()
 
         if lesson.domain == "support_preference" and support_preference in {
             "listening",
@@ -361,6 +362,44 @@ class CognitionUpdater:
                 )
             return InferredMemory(
                 content=content or f"User often prefers {support_preference.replace('_', '-')} support.",
+                source=source,
+                confidence=max(confidence, 0.8),
+                updated_at=updated_at,
+                confirmed_by_user=False,
+                time_horizon="medium_term",
+                status="active",
+                sensitivity=sensitivity,
+                memory_key=memory_key,
+                metadata={"lesson_id": lesson.id, "category": lesson.category},
+            )
+
+        if lesson.domain == "proactivity_preference" and proactivity_preference in {"allow", "suppress"}:
+            memory_key = f"proactivity_preference:{proactivity_preference}"
+            if lesson.details.get("explicit_user_statement", False):
+                return FactualMemory(
+                    content=content
+                    or (
+                        "User explicitly allows gentle follow-up on important topics."
+                        if proactivity_preference == "allow"
+                        else "User explicitly does not want proactive follow-up or reminders."
+                    ),
+                    source=source,
+                    confidence=max(confidence, 0.85),
+                    updated_at=updated_at,
+                    confirmed_by_user=bool(lesson.details.get("explicit_user_confirmation", True)),
+                    time_horizon="long_term",
+                    status="active",
+                    sensitivity=sensitivity,
+                    memory_key=memory_key,
+                    metadata={"lesson_id": lesson.id, "category": lesson.category},
+                )
+            return InferredMemory(
+                content=content
+                or (
+                    "User may be open to gentle follow-up on important topics."
+                    if proactivity_preference == "allow"
+                    else "User may prefer no proactive follow-up."
+                ),
                 source=source,
                 confidence=max(confidence, 0.8),
                 updated_at=updated_at,

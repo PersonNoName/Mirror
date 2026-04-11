@@ -20,6 +20,9 @@ from app.memory.core_memory import (
     MemoryGovernancePolicy,
     MemoryEntry,
     PersonalityState,
+    ProactivityOpportunity,
+    ProactivityPolicy,
+    ProactivityState,
     RelationshipStageState,
     RelationshipStyle,
     RelationshipMemory,
@@ -171,6 +174,48 @@ def _memory_governance_from_dict(data: dict[str, Any]) -> MemoryGovernancePolicy
     )
 
 
+def _proactivity_policy_from_dict(data: dict[str, Any]) -> ProactivityPolicy:
+    policy = ProactivityPolicy()
+    return ProactivityPolicy(
+        enabled=bool(data.get("enabled", policy.enabled)),
+        min_interval_hours=int(data.get("min_interval_hours", policy.min_interval_hours)),
+        same_topic_cooldown_hours=int(data.get("same_topic_cooldown_hours", policy.same_topic_cooldown_hours)),
+        max_followups_per_14_days=int(data.get("max_followups_per_14_days", policy.max_followups_per_14_days)),
+        updated_at=str(data.get("updated_at", "")) or policy.updated_at,
+    )
+
+
+def _proactivity_opportunity_from_dict(data: dict[str, Any]) -> ProactivityOpportunity:
+    return ProactivityOpportunity(
+        topic_key=str(data.get("topic_key", "")),
+        summary=str(data.get("summary", "")),
+        importance=str(data.get("importance", "low")),
+        created_at=str(data.get("created_at", "")),
+        updated_at=str(data.get("updated_at", "")),
+        session_id=str(data.get("session_id", "")),
+        source=str(data.get("source", "dialogue")),
+        status=str(data.get("status", "pending")),
+        conservative_reference=str(data.get("conservative_reference", "")),
+        metadata=dict(data.get("metadata", {})),
+    )
+
+
+def _proactivity_state_from_dict(data: dict[str, Any]) -> ProactivityState:
+    return ProactivityState(
+        last_user_message_at=str(data.get("last_user_message_at", "")),
+        last_proactive_at=str(data.get("last_proactive_at", "")),
+        last_topic_key=str(data.get("last_topic_key", "")),
+        latest_preference_override=str(data.get("latest_preference_override", "unknown")),
+        preference_updated_at=str(data.get("preference_updated_at", "")),
+        last_suppression_reason=str(data.get("last_suppression_reason", "")),
+        recent_outreach=[dict(item) for item in list(data.get("recent_outreach", []))],
+        pending_opportunities=[
+            _proactivity_opportunity_from_dict(item)
+            for item in list(data.get("pending_opportunities", []))
+        ],
+    )
+
+
 def _legacy_world_model_items_to_facts(items: list[dict[str, Any]], section: str) -> list[FactualMemory]:
     facts: list[FactualMemory] = []
     for index, item in enumerate(items):
@@ -255,6 +300,12 @@ def _core_memory_from_dict(data: dict[str, Any]) -> CoreMemory:
             ),
             memory_governance=_memory_governance_from_dict(
                 dict(world_model.get("memory_governance", {}))
+            ),
+            proactivity_policy=_proactivity_policy_from_dict(
+                dict(world_model.get("proactivity_policy", {}))
+            ),
+            proactivity_state=_proactivity_state_from_dict(
+                dict(world_model.get("proactivity_state", {}))
             ),
             pending_confirmations=[
                 _durable_memory_from_dict(item)

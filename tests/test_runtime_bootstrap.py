@@ -92,6 +92,23 @@ class StubRelationshipStateMachine:
         self.degraded = False
 
 
+class StubGentleProactivityService:
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+        self.degraded = False
+        self.core_memory_scheduler = kwargs.get("core_memory_scheduler")
+
+    async def handle_dialogue_ended(self, event: object) -> None:
+        return None
+
+    def summary(self) -> dict[str, object]:
+        return {
+            "gentle_proactivity_enabled": True,
+            "gentle_proactivity_degraded": False,
+            "status": "ok",
+        }
+
+
 class StubSignalExtractor:
     def __init__(self, personality_evolver: object, event_bus: object | None = None) -> None:
         self.personality_evolver = personality_evolver
@@ -227,6 +244,7 @@ async def test_bootstrap_runtime_survives_degraded_dependencies(monkeypatch: pyt
     monkeypatch.setattr(bootstrap_module, "PersonalitySnapshotStore", StubSnapshotStore)
     monkeypatch.setattr(bootstrap_module, "PersonalityEvolver", StubPersonalityEvolver)
     monkeypatch.setattr(bootstrap_module, "RelationshipStateMachine", StubRelationshipStateMachine)
+    monkeypatch.setattr(bootstrap_module, "GentleProactivityService", StubGentleProactivityService)
     monkeypatch.setattr(bootstrap_module, "SignalExtractor", StubSignalExtractor)
     monkeypatch.setattr(bootstrap_module, "ObserverEngine", StubObserver)
     monkeypatch.setattr(bootstrap_module, "MetaCognitionReflector", StubReflector)
@@ -270,3 +288,5 @@ async def test_bootstrap_runtime_survives_degraded_dependencies(monkeypatch: pyt
     assert health["subsystems"]["relationship_stage"]["status"] == "ok"
     assert health["subsystems"]["relationship_stage"]["relationship_stage_enabled"] is True
     assert health["subsystems"]["memory_governance"]["status"] == "ok"
+    assert health["subsystems"]["gentle_proactivity"]["status"] == "ok"
+    assert health["subsystems"]["gentle_proactivity"]["gentle_proactivity_enabled"] is True

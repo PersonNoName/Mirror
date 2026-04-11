@@ -23,6 +23,9 @@ RelationshipStage = Literal[
     "vulnerable_support",
     "repair_and_recovery",
 ]
+ProactivityPreference = Literal["allow", "suppress", "unknown"]
+TopicImportance = Literal["low", "medium", "high"]
+ProactivityOpportunityStatus = Literal["pending", "sent", "suppressed"]
 
 
 def utc_now_iso() -> str:
@@ -112,6 +115,47 @@ class MemoryGovernancePolicy:
         }
     )
     updated_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(slots=True)
+class ProactivityPolicy:
+    """Bounded policy for low-intrusion proactive follow-up."""
+
+    enabled: bool = True
+    min_interval_hours: int = 72
+    same_topic_cooldown_hours: int = 168
+    max_followups_per_14_days: int = 2
+    updated_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(slots=True)
+class ProactivityOpportunity:
+    """Potential follow-up context captured from a prior exchange."""
+
+    topic_key: str
+    summary: str
+    importance: TopicImportance = "low"
+    created_at: str = field(default_factory=utc_now_iso)
+    updated_at: str = field(default_factory=utc_now_iso)
+    session_id: str = ""
+    source: str = "dialogue"
+    status: ProactivityOpportunityStatus = "pending"
+    conservative_reference: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ProactivityState:
+    """Runtime-facing durable state for gentle follow-up decisions."""
+
+    last_user_message_at: str = ""
+    last_proactive_at: str = ""
+    last_topic_key: str = ""
+    latest_preference_override: ProactivityPreference = "unknown"
+    preference_updated_at: str = ""
+    last_suppression_reason: str = ""
+    recent_outreach: list[dict[str, Any]] = field(default_factory=list)
+    pending_opportunities: list[ProactivityOpportunity] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -205,6 +249,8 @@ class WorldModel:
     relationship_history: list[RelationshipMemory] = field(default_factory=list)
     relationship_stage: RelationshipStageState = field(default_factory=RelationshipStageState)
     memory_governance: MemoryGovernancePolicy = field(default_factory=MemoryGovernancePolicy)
+    proactivity_policy: ProactivityPolicy = field(default_factory=ProactivityPolicy)
+    proactivity_state: ProactivityState = field(default_factory=ProactivityState)
     pending_confirmations: list[DurableMemory] = field(default_factory=list)
     memory_conflicts: list[DurableMemory] = field(default_factory=list)
 

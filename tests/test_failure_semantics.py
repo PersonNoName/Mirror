@@ -232,6 +232,14 @@ def test_bind_runtime_state_disables_streaming_when_redis_missing() -> None:
             }
         ),
         relationship_state_machine=SimpleNamespace(degraded=False),
+        proactivity_service=SimpleNamespace(
+            degraded=False,
+            summary=lambda: {
+                "gentle_proactivity_enabled": True,
+                "gentle_proactivity_degraded": False,
+                "status": "ok",
+            },
+        ),
         memory_governance_service=SimpleNamespace(degraded=False),
         personality_evolver=SimpleNamespace(),
         observer=SimpleNamespace(),
