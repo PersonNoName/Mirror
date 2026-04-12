@@ -28,6 +28,7 @@ class ActionRouter:
         task_system: Any,
         tool_registry: Any,
         hook_registry: Any | None = None,
+        trace_service: Any | None = None,
     ) -> None:
         self.platform_adapter = platform_adapter
         self.event_bus = event_bus
@@ -35,9 +36,16 @@ class ActionRouter:
         self.task_system = task_system
         self.tool_registry = tool_registry
         self.hook_registry = hook_registry
+        self.trace_service = trace_service
 
     async def route(self, action: Action, inbound_message: InboundMessage) -> dict[str, Any] | None:
         ctx = inbound_message.platform_ctx
+        await self._trace(
+            inbound_message,
+            "routing",
+            "Action router received action",
+            {"action_type": action.type},
+        )
         if action.type == "direct_reply":
             await self.platform_adapter.send_outbound(
                 ctx,
@@ -61,6 +69,12 @@ class ActionRouter:
                     action=action,
                     reply=str(action.content),
                 )
+            await self._trace(
+                inbound_message,
+                "routing",
+                "Direct reply delivered to platform",
+                {"reply_preview": str(action.content)[:200]},
+            )
             return {
                 "reply": str(action.content),
                 "action": action.type,
@@ -81,6 +95,12 @@ class ActionRouter:
                 )
                 await self.blackboard.on_task_waiting_hitl(task, request)
                 await self.platform_adapter.send_hitl(ctx, request)
+                await self._trace(
+                    inbound_message,
+                    "routing",
+                    "Task downgraded to HITL because no agent could execute it reliably",
+                    {"task_id": task.id, "capability_score": cap_score},
+                )
                 return {
                     "reply": request.description,
                     "action": "hitl_relay",
@@ -100,6 +120,12 @@ class ActionRouter:
                     task=task,
                     capability_score=cap_score,
                 )
+            await self._trace(
+                inbound_message,
+                "routing",
+                "Task assigned to agent",
+                {"task_id": task.id, "agent": best_agent.name, "capability_score": cap_score},
+            )
             if cap_score < 0.5:
                 await self.blackboard.assign(task)
                 message = (
@@ -118,6 +144,12 @@ class ActionRouter:
                         reply=message,
                         task=task,
                     )
+                await self._trace(
+                    inbound_message,
+                    "routing",
+                    "Low-confidence task dispatch reply delivered",
+                    {"task_id": task.id, "reply_preview": message[:200]},
+                )
                 return {
                     "reply": message,
                     "action": action.type,
@@ -136,6 +168,12 @@ class ActionRouter:
                     reply=message,
                     task=task,
                 )
+            await self._trace(
+                inbound_message,
+                "routing",
+                "Task dispatch reply delivered",
+                {"task_id": task.id, "reply_preview": message[:200]},
+            )
             return {
                 "reply": message,
                 "action": action.type,
@@ -158,6 +196,12 @@ class ActionRouter:
                     reply=request.description,
                     task_id=request.task_id,
                 )
+            await self._trace(
+                inbound_message,
+                "routing",
+                "HITL request delivered to platform",
+                {"task_id": request.task_id, "reply_preview": request.description[:200]},
+            )
             return {
                 "reply": request.description,
                 "action": action.type,
@@ -175,6 +219,12 @@ class ActionRouter:
                     action=action,
                     reply=reply,
                 )
+            await self._trace(
+                inbound_message,
+                "routing",
+                "Tool-call reply delivered to platform",
+                {"reply_preview": reply[:200]},
+            )
             return {
                 "reply": reply,
                 "action": action.type,
@@ -217,6 +267,22 @@ class ActionRouter:
         if isinstance(result, str):
             return result
         return json.dumps(result, ensure_ascii=False, default=str)
+
+    async def _trace(
+        self,
+        inbound_message: InboundMessage,
+        step_type: str,
+        title: str,
+        data: dict[str, Any],
+    ) -> None:
+        if self.trace_service is None:
+            return
+        await self.trace_service.add_step(
+            inbound_message.session_id,
+            step_type=step_type,
+            title=title,
+            data=data,
+        )
 
     @staticmethod
     def _parse_tool_payload(content: Any) -> dict[str, Any]:

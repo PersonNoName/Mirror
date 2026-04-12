@@ -11,6 +11,7 @@ import pytest
 
 from app.evolution.event_bus import Event, RedisStreamsEventBus
 from app.logging import configure_logging
+from app.observability import ChatTraceService
 from app.runtime.bootstrap import RuntimeContext
 from app.soul.models import Action
 from app.soul.router import ActionRouter
@@ -148,9 +149,13 @@ async def test_event_bus_logs_handler_failure() -> None:
     with StdoutCapture() as stream:
         await bus._handle_message("dialogue_ended", "stream:event:dialogue", "group:event:dialogue_ended", "1-0", fields)
 
-    payload = json.loads(stream.getvalue().strip().splitlines()[-1])
-    assert payload["event"] == "event_handler_failed"
-    assert payload["event_id"] == "evt-log"
+    payloads = [json.loads(line) for line in stream.getvalue().strip().splitlines()]
+    failure = next(item for item in payloads if item["event"] == "event_handler_failed")
+    summary = next(item for item in payloads if item["event"] == "event_processed_with_handler_failures")
+    assert failure["event_id"] == "evt-log"
+    assert failure["handler"] == "failing_handler"
+    assert "exception" in failure
+    assert summary["failed_handlers"] == ["failing_handler"]
 
 
 @pytest.mark.asyncio
@@ -228,6 +233,7 @@ def test_runtime_health_snapshot_includes_observability_fields() -> None:
         action_router=SimpleNamespace(),
         skill_loader=SimpleNamespace(),
         mcp_adapter=SimpleNamespace(),
+        chat_trace_service=ChatTraceService(),
         skill_summary={"loaded": [1, 2], "skipped": [3], "failed": []},
         mcp_summary={"loaded": [], "skipped": [1], "failed": [2, 3]},
         builtins_summary={},

@@ -38,6 +38,7 @@ from app.memory import (
     SessionContextStore,
     VectorRetriever,
 )
+from app.observability import ChatTraceService
 from app.platform.web import WebPlatformAdapter
 from app.providers import ModelProviderRegistry, build_routing_from_settings
 from app.skills import SkillLoader
@@ -106,6 +107,7 @@ class RuntimeContext:
     action_router: ActionRouter
     skill_loader: SkillLoader
     mcp_adapter: MCPToolAdapter
+    chat_trace_service: ChatTraceService
     skill_summary: dict[str, Any] = field(default_factory=dict)
     mcp_summary: dict[str, Any] = field(default_factory=dict)
     builtins_summary: dict[str, Any] = field(default_factory=dict)
@@ -285,6 +287,7 @@ async def bootstrap_runtime() -> RuntimeContext:
     task_monitor = TaskMonitor(task_store=task_store, blackboard=blackboard)
 
     web_platform = WebPlatformAdapter()
+    chat_trace_service = ChatTraceService(emitter=web_platform.emit_trace)
     circuit_breaker = AsyncCircuitBreaker()
     memory_governance_service = MemoryGovernanceService(
         core_memory_cache=core_memory_cache,
@@ -374,6 +377,7 @@ async def bootstrap_runtime() -> RuntimeContext:
         tool_registry=tool_registry,
         hook_registry=hook_registry,
         proactivity_service=proactivity_service,
+        trace_service=chat_trace_service,
     )
     action_router = ActionRouter(
         platform_adapter=web_platform,
@@ -382,6 +386,7 @@ async def bootstrap_runtime() -> RuntimeContext:
         task_system=task_system,
         tool_registry=tool_registry,
         hook_registry=hook_registry,
+        trace_service=chat_trace_service,
     )
 
     await event_bus.subscribe("dialogue_ended", observer.handle_dialogue_ended)
@@ -466,6 +471,7 @@ async def bootstrap_runtime() -> RuntimeContext:
         action_router=action_router,
         skill_loader=skill_loader,
         mcp_adapter=mcp_adapter,
+        chat_trace_service=chat_trace_service,
         skill_summary=skill_summary,
         mcp_summary=mcp_summary,
         builtins_summary={"loaded": builtins},

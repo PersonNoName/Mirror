@@ -7,6 +7,7 @@ import pytest
 from fastapi import FastAPI
 
 from app.evolution.event_bus import Event, RedisStreamsEventBus
+from app.observability import ChatTraceService
 from app.runtime.bootstrap import RuntimeContext, bind_runtime_state
 from app.tasks.models import Task, TaskResult
 from app.tasks.outbox_relay import OutboxRelay
@@ -115,21 +116,27 @@ class SilentPlatformAdapter:
 
 
 @pytest.mark.asyncio
-async def test_event_bus_handler_failure_does_not_ack_message() -> None:
+async def test_event_bus_handler_failure_is_isolated_and_message_is_acked() -> None:
     redis = RecordingRedisClient()
     idempotency = RecordingIdempotencyStore()
     bus = RedisStreamsEventBus(redis_client=redis, outbox_store=object(), idempotency_store=idempotency)
+    handled: list[str] = []
 
     async def failing_handler(event: Event) -> None:
         raise RuntimeError("boom")
 
+    async def succeeding_handler(event: Event) -> None:
+        handled.append(event.id)
+
     await bus.subscribe("dialogue_ended", failing_handler)
+    await bus.subscribe("dialogue_ended", succeeding_handler)
     fields = {"payload": '{"event":{"id":"evt-1","type":"dialogue_ended","payload":{}}}'}
 
     await bus._handle_message("dialogue_ended", "stream:event:dialogue", "group:event:dialogue_ended", "1-0", fields)
 
-    assert redis.acks == []
-    assert idempotency.done == []
+    assert handled == ["evt-1"]
+    assert redis.acks == [("stream:event:dialogue", "group:event:dialogue_ended", "1-0")]
+    assert idempotency.done == [("event_consumer:dialogue_ended", "evt-1")]
 
 
 @pytest.mark.asyncio
@@ -286,6 +293,7 @@ def test_bind_runtime_state_disables_streaming_when_redis_missing() -> None:
         action_router=SimpleNamespace(),
         skill_loader=SimpleNamespace(),
         mcp_adapter=SimpleNamespace(),
+        chat_trace_service=ChatTraceService(),
         skill_summary={},
         mcp_summary={},
         builtins_summary={},

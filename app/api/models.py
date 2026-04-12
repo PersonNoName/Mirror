@@ -29,6 +29,27 @@ class ApiErrorResponse(BaseModel):
 
 class ChatMetaResponse(BaseModel):
     task_id: str | None = None
+    trace_id: str | None = None
+
+
+class ChatTraceStepResponse(BaseModel):
+    id: str
+    type: str
+    title: str
+    data: dict[str, Any]
+    created_at: datetime | str
+
+
+class ChatTraceResponse(BaseModel):
+    trace_id: str
+    user_id: str
+    session_id: str
+    status: str
+    input: dict[str, Any]
+    steps: list[ChatTraceStepResponse]
+    started_at: datetime | str
+    finished_at: datetime | str | None = None
+    output: dict[str, Any] | None = None
 
 
 class ChatResponse(BaseModel):
@@ -37,6 +58,7 @@ class ChatResponse(BaseModel):
     user_id: str
     status: str
     meta: ChatMetaResponse | None = None
+    trace: ChatTraceResponse | None = None
 
 
 class HitlResponse(BaseModel):
@@ -98,6 +120,16 @@ class MemoryCorrectionResponse(BaseModel):
 class MemoryDeleteResponse(BaseModel):
     status: str
     memory_key: str
+
+
+class PromptTemplateResponse(BaseModel):
+    key: str
+    content: str
+
+
+class PromptTemplateListResponse(BaseModel):
+    items: list[PromptTemplateResponse]
+    count: int
 
 
 class MemoryCorrectionRequest(APIModel):

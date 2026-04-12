@@ -8,6 +8,7 @@ from app.evolution import EvolutionCandidateManager, EvolutionJournal
 from app.evolution.cognition_updater import CognitionUpdater
 from app.memory.core_memory import CoreMemory, FactualMemory, InferredMemory, RelationshipMemory
 from app.memory.core_memory_store import _core_memory_from_dict
+from app.tasks.store import TaskStore
 from app.tasks.models import Lesson, Task
 
 
@@ -588,3 +589,25 @@ async def test_implicit_situational_preference_is_stored_as_short_term_inference
     assert stored.memory_key == "inference:implicit_preference:likes:coffee"
     assert stored.time_horizon == "short_term"
     assert stored.metadata["memory_tier"] == "session_hint"
+
+
+def test_task_store_serializes_jsonb_fields_for_asyncpg() -> None:
+    task = Task(
+        id="task-json",
+        intent="memory_confirmation",
+        result={"ok": True},
+        metadata={
+            "user_id": "user-1",
+            "memory_confirmation": {
+                "memory_key": "inference:test",
+                "candidate": {"memory_key": "inference:test", "content": "x"},
+            },
+        },
+    )
+
+    payload = TaskStore._serialize_task(task)
+
+    assert isinstance(payload[6], str)
+    assert isinstance(payload[14], str)
+    assert "\"ok\": true" in payload[6]
+    assert "\"memory_confirmation\"" in payload[14]

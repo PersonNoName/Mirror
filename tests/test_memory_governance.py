@@ -118,6 +118,47 @@ async def test_memory_governance_corrects_inference_into_user_confirmed_fact() -
 
 
 @pytest.mark.asyncio
+async def test_memory_governance_correction_supersedes_all_active_duplicates_for_same_key() -> None:
+    core_memory = CoreMemory()
+    core_memory.world_model.confirmed_facts.extend(
+        [
+            FactualMemory(
+                content="User prefers concise replies",
+                source="lesson",
+                confidence=0.9,
+                confirmed_by_user=True,
+                memory_key="fact:preferences:concise",
+            ),
+            FactualMemory(
+                content="User prefers concise replies",
+                source="lesson",
+                confidence=0.95,
+                confirmed_by_user=True,
+                memory_key="fact:preferences:concise",
+            ),
+        ]
+    )
+    service = MemoryGovernanceService(
+        core_memory_cache=DummyCoreMemoryCache(core_memory),
+        core_memory_scheduler=RecordingScheduler(core_memory),
+        graph_store=RecordingGraphStore(),
+        candidate_manager=EvolutionCandidateManager(EvolutionJournal()),
+        evolution_journal=EvolutionJournal(),
+    )
+
+    await service.correct_memory(
+        user_id="user-1",
+        memory_key="fact:preferences:concise",
+        corrected_content="User prefers careful detailed answers",
+        truth_type="fact",
+    )
+    listed = await service.list_memory(user_id="user-1")
+
+    assert sum(1 for item in listed if item["memory_key"] == "fact:preferences:concise") == 1
+    assert listed[0]["content"] == "User prefers careful detailed answers"
+
+
+@pytest.mark.asyncio
 async def test_memory_governance_delete_marks_relationship_deleted_and_reverts_candidate() -> None:
     core_memory = CoreMemory()
     relationship = RelationshipMemory(

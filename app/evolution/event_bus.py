@@ -282,11 +282,33 @@ class RedisStreamsEventBus(EventBus):
                 await self.redis_client.xack(stream_name, group_name, delivery_id)
                 return
         try:
+            failed_handlers: list[str] = []
             for handler in list(self._handlers.get(event_type, [])):
-                await handler(event)
+                try:
+                    await handler(event)
+                except Exception:
+                    handler_name = self._handler_name(handler)
+                    failed_handlers.append(handler_name)
+                    logger.exception(
+                        "event_handler_failed",
+                        event_type=event_type,
+                        stream_name=stream_name,
+                        delivery_id=str(delivery_id),
+                        event_id=event.id,
+                        handler=handler_name,
+                    )
+            if failed_handlers:
+                logger.warning(
+                    "event_processed_with_handler_failures",
+                    event_type=event_type,
+                    stream_name=stream_name,
+                    delivery_id=str(delivery_id),
+                    event_id=event.id,
+                    failed_handlers=failed_handlers,
+                )
         except Exception:
             logger.exception(
-                "event_handler_failed",
+                "event_dispatch_failed",
                 event_type=event_type,
                 stream_name=stream_name,
                 delivery_id=str(delivery_id),
@@ -306,6 +328,16 @@ class RedisStreamsEventBus(EventBus):
                 )
                 return
         await self.redis_client.xack(stream_name, group_name, delivery_id)
+
+    @staticmethod
+    def _handler_name(handler: Any) -> str:
+        name = getattr(handler, "__name__", "")
+        if name:
+            return name
+        qualname = getattr(handler, "__qualname__", "")
+        if qualname:
+            return qualname
+        return handler.__class__.__name__
 
     @staticmethod
     def stream_for_type(event_type: str) -> str:

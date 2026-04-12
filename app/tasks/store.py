@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from typing import Any
 
@@ -155,7 +156,7 @@ class TaskStore:
             task.intent,
             task.status,
             task.priority,
-            task.result,
+            TaskStore._to_json(task.result),
             task.error_trace,
             task.retry_count,
             task.timeout_seconds,
@@ -163,13 +164,13 @@ class TaskStore:
             task.dispatch_stream,
             task.consumer_group,
             task.delivery_token,
-            metadata,
+            TaskStore._to_json(metadata),
             task.created_at,
         )
 
     @staticmethod
     def _deserialize_task(row: Any) -> Task:
-        raw_metadata = dict(row["metadata"] or {})
+        raw_metadata = TaskStore._from_json(row["metadata"])
         reserved = dict(raw_metadata.pop("_task_fields", {}))
         return Task(
             id=str(row["id"]),
@@ -181,7 +182,7 @@ class TaskStore:
             status=row["status"],
             priority=row["priority"],
             depends_on=list(reserved.get("depends_on", [])),
-            result=row["result"],
+            result=TaskStore._from_json(row["result"]),
             error_trace=row["error_trace"],
             retry_count=row["retry_count"],
             max_retries=int(reserved.get("max_retries", 2)),
@@ -194,3 +195,22 @@ class TaskStore:
             created_at=row["created_at"],
             metadata=raw_metadata,
         )
+
+    @staticmethod
+    def _to_json(value: Any) -> str:
+        return json.dumps(value if value is not None else {})
+
+    @staticmethod
+    def _from_json(value: Any) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, str):
+            loaded = json.loads(value)
+            if loaded is None:
+                return None
+            if isinstance(loaded, dict):
+                return loaded
+            return loaded
+        return value

@@ -11,6 +11,7 @@ from httpx_sse import aconnect_sse
 from app.agents.base import SubAgent
 from app.config import settings
 from app.platform.base import HitlRequest
+from app.prompts import render_code_agent_core_prompt
 from app.tasks.models import Task, TaskResult
 
 
@@ -273,11 +274,11 @@ class CodeAgent(SubAgent):
             return
 
     def _build_prompt(self, task: Task) -> str:
-        return f"""Task intent: {task.intent}
-
-Working directory: {task.metadata.get("working_dir", ".")}
-
-Constraints: {task.metadata.get("constraints", "None")}
-
-Complete the task and return the result strictly in the provided JSON schema.
-Prefer a concise summary and list every changed file path when applicable."""
+        runtime_context = "\n\n".join(
+            [
+                f"Task intent: {task.intent}",
+                f"Working directory: {task.metadata.get('working_dir', '.')}",
+                f"Constraints: {task.metadata.get('constraints', 'None')}",
+            ]
+        )
+        return "\n\n".join([runtime_context, render_code_agent_core_prompt()])

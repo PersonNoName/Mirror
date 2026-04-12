@@ -144,11 +144,16 @@ class MemoryGovernanceService:
     ) -> dict[str, Any]:
         current = deepcopy(await self.core_memory_cache.get(user_id))
         world_model = current.world_model
-        target = self._find_memory(world_model, memory_key)
-        if target is None:
+        matches = self._find_memories(world_model, memory_key)
+        active_matches = [
+            item for item in matches if item.status != "superseded" and not item.metadata.get("deleted_by_user", False)
+        ]
+        if not active_matches:
             raise KeyError(memory_key)
-        target.status = "superseded"
-        target.metadata["corrected_by_user"] = True
+        target = active_matches[-1]
+        for item in active_matches:
+            item.status = "superseded"
+            item.metadata["corrected_by_user"] = True
         replacement = self._build_corrected_memory(
             target=target,
             corrected_content=corrected_content,
@@ -206,12 +211,17 @@ class MemoryGovernanceService:
     async def delete_memory(self, *, user_id: str, memory_key: str, reason: str) -> None:
         current = deepcopy(await self.core_memory_cache.get(user_id))
         world_model = current.world_model
-        target = self._find_memory(world_model, memory_key)
-        if target is None:
+        matches = self._find_memories(world_model, memory_key)
+        active_matches = [
+            item for item in matches if item.status != "superseded" and not item.metadata.get("deleted_by_user", False)
+        ]
+        if not active_matches:
             raise KeyError(memory_key)
-        target.status = "superseded"
-        target.metadata["deleted_by_user"] = True
-        target.metadata["governance_reason"] = reason
+        target = active_matches[-1]
+        for item in active_matches:
+            item.status = "superseded"
+            item.metadata["deleted_by_user"] = True
+            item.metadata["governance_reason"] = reason
         if isinstance(target, RelationshipMemory) and self.graph_store is not None:
             await self.graph_store.supersede_relation(
                 user_id=user_id,
@@ -338,6 +348,12 @@ class MemoryGovernanceService:
 
     @staticmethod
     def _find_memory(world_model: WorldModel, memory_key: str) -> DurableMemory | None:
+        matches = MemoryGovernanceService._find_memories(world_model, memory_key)
+        return matches[-1] if matches else None
+
+    @staticmethod
+    def _find_memories(world_model: WorldModel, memory_key: str) -> list[DurableMemory]:
+        matches: list[DurableMemory] = []
         for section in (
             world_model.confirmed_facts,
             world_model.inferred_memories,
@@ -347,8 +363,8 @@ class MemoryGovernanceService:
         ):
             for item in section:
                 if item.memory_key == memory_key:
-                    return item
-        return None
+                    matches.append(item)
+        return matches
 
     @staticmethod
     def _append_memory(world_model: WorldModel, memory: DurableMemory) -> None:

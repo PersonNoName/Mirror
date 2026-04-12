@@ -19,72 +19,8 @@ from app.memory import CoreMemoryCache, SessionContextStore, VectorRetriever
 from app.platform.base import InboundMessage
 from app.providers.openai_compat import ProviderRequestError
 from app.providers.registry import ModelProviderRegistry
+from app.prompts import render_soul_core_system_prompt
 from app.soul.models import Action, EmotionalInterpretation, SupportPolicyDecision
-
-
-SOUL_SYSTEM_PROMPT_TEMPLATE = """
-You are Mirror's foreground reasoning agent.
-You are a direct collaborator, not a submissive assistant.
-
-## Self Cognition
-{self_cognition}
-
-## World Model
-{world_model}
-
-## Stable Identity
-{stable_identity}
-
-## Relationship Style
-{relationship_style}
-
-## Relationship Stage
-{relationship_stage}
-
-## Proactivity Policy
-{proactivity_policy}
-
-## Emotional Context
-{emotional_context}
-
-## Support Policy
-{support_policy}
-
-## Session Adaptation
-{session_adaptations}
-
-## Task Experience
-{task_experience}
-
-## Available Tools
-{tool_list}
-
-## Constraints
-- Avoid filler acknowledgements such as "of course", "sure", or "glad to help".
-- If the user's request is unreasonable, record that in `<inner_thoughts>`.
-- Treat confirmed facts as highest-trust memory.
-- Never present an inferred memory as if the user explicitly confirmed it.
-- If memory conflicts exist, answer conservatively or ask for confirmation.
-- In listening mode, prioritize acknowledgement, clarification, and presence over advice.
-- In problem-solving mode, give bounded suggestions without sounding commanding or clinical.
-- In blended mode, acknowledge feelings first, then offer a small number of optional next steps.
-- Stored support preferences are hints only; current explicit user intent takes precedence.
-- In safety-constrained mode, avoid tool/task escalation and keep advice conservative.
-- Any proactive follow-up must stay low-frequency, reference prior context conservatively, and avoid repetitive reminder phrasing.
-- Do not claim you stored or remembered a new user fact unless it already appears in the supplied world model.
-- Think before acting. Every action must follow the required output format.
-
-## Output Format
-<inner_thoughts>
-[private reasoning]
-</inner_thoughts>
-<action>
-[one of: direct_reply | tool_call | publish_task | hitl_relay]
-</action>
-<content>
-[content for the selected action]
-</content>
-""".strip()
 
 
 class SoulEngine:
@@ -99,6 +35,7 @@ class SoulEngine:
         tool_registry: Any,
         hook_registry: HookRegistry | None = None,
         proactivity_service: Any | None = None,
+        trace_service: Any | None = None,
     ) -> None:
         self.model_registry = model_registry
         self.core_memory_cache = core_memory_cache
@@ -107,6 +44,7 @@ class SoulEngine:
         self.tool_registry = tool_registry
         self.hook_registry = hook_registry
         self.proactivity_service = proactivity_service
+        self.trace_service = trace_service
 
     async def run(self, message: InboundMessage) -> Action:
         """Reason about an inbound message and produce a structured action."""
@@ -115,13 +53,68 @@ class SoulEngine:
             await self.hook_registry.trigger(HookPoint.PRE_REASON, message=message)
 
         core_memory = await self.core_memory_cache.get(message.user_id)
+        await self._trace_step(
+            message,
+            "memory",
+            "Core memory loaded",
+            {"confirmed_fact_count": len(core_memory.world_model.confirmed_facts)},
+        )
         recent_messages = await self._get_recent_messages(message)
+        await self._trace_step(
+            message,
+            "context",
+            "Recent session messages loaded",
+            {
+                "count": len(recent_messages),
+                "items": [
+                    {
+                        "role": item.get("role", "unknown"),
+                        "content_preview": str(item.get("content", ""))[:120],
+                    }
+                    for item in recent_messages[-5:]
+                ],
+            },
+        )
         session_adaptations = await self._get_session_adaptations(message)
+        await self._trace_step(
+            message,
+            "context",
+            "Session adaptations loaded",
+            {"count": len(session_adaptations), "items": session_adaptations[:10]},
+        )
         retrieved = await self._retrieve_context(message)
+        await self._trace_step(
+            message,
+            "retrieval",
+            "Memory retrieval finished",
+            {
+                "count": len(retrieved.get("matches", [])),
+                "matches": [
+                    {
+                        "namespace": item.get("namespace", ""),
+                        "content_preview": str(item.get("content", ""))[:120],
+                        "score": item.get("rerank_score", item.get("score")),
+                        "truth_type": item.get("truth_type", "fact"),
+                    }
+                    for item in retrieved.get("matches", [])[:8]
+                ],
+            },
+        )
         emotional_context = self._interpret_emotion(message.text, core_memory)
         support_policy = self._build_support_policy(message.text, core_memory, emotional_context)
         emotional_context.support_mode = support_policy.support_mode
         emotional_context.support_preference = support_policy.inferred_preference
+        await self._trace_step(
+            message,
+            "reasoning",
+            "Emotional context and support policy resolved",
+            {
+                "emotion_class": emotional_context.emotion_class,
+                "emotional_risk": emotional_context.emotional_risk,
+                "support_mode": support_policy.support_mode,
+                "stored_preference": support_policy.stored_preference,
+            },
+        )
 
         if emotional_context.emotional_risk == "high":
             action = self._high_risk_emotional_action(message, emotional_context)
@@ -132,6 +125,7 @@ class SoulEngine:
                     action=action,
                     prompt="",
                 )
+            await self._trace_action(message, action, "High-risk short-circuit action generated")
             return action
 
         prompt = self._build_prompt(
@@ -157,6 +151,7 @@ class SoulEngine:
             action = self._fallback_action(message)
             if self.hook_registry is not None:
                 await self.hook_registry.trigger(HookPoint.POST_REASON, message=message, action=action, prompt=prompt)
+            await self._trace_action(message, action, "Fallback action generated because reasoning model was unavailable")
             return action
 
         raw_text = self._extract_response_text(response)
@@ -165,11 +160,41 @@ class SoulEngine:
             action = self._fallback_action(message, raw_response=raw_text)
             if self.hook_registry is not None:
                 await self.hook_registry.trigger(HookPoint.POST_REASON, message=message, action=action, prompt=prompt)
+            await self._trace_action(message, action, "Fallback action generated because model output could not be parsed")
             return action
         parsed.raw_response = raw_text
         if self.hook_registry is not None:
             await self.hook_registry.trigger(HookPoint.POST_REASON, message=message, action=parsed, prompt=prompt)
+        await self._trace_action(message, parsed, "Structured action generated")
         return parsed
+
+    async def _trace_step(
+        self,
+        message: InboundMessage,
+        step_type: str,
+        title: str,
+        data: dict[str, Any],
+    ) -> None:
+        if self.trace_service is None:
+            return
+        await self.trace_service.add_step(
+            message.session_id,
+            step_type=step_type,
+            title=title,
+            data=data,
+        )
+
+    async def _trace_action(self, message: InboundMessage, action: Action, title: str) -> None:
+        await self._trace_step(
+            message,
+            "reasoning",
+            title,
+            {
+                "action_type": action.type,
+                "content_preview": str(action.content)[:200],
+                "metadata": dict(action.metadata),
+            },
+        )
 
     async def _get_recent_messages(self, message: InboundMessage) -> list[dict[str, Any]]:
         if self.session_context_store is None:
@@ -240,7 +265,7 @@ class SoulEngine:
 
         return "\n\n".join(
             [
-                SOUL_SYSTEM_PROMPT_TEMPLATE.format(
+                render_soul_core_system_prompt(
                     self_cognition=self._format_self_cognition(core_memory),
                     world_model=self._format_world_model(core_memory.world_model),
                     stable_identity=self._format_stable_identity(core_memory, behavioral_rules),

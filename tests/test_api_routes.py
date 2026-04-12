@@ -11,6 +11,8 @@ from app.api.chat import router as chat_router
 from app.api.hitl import router as hitl_router
 from app.api.journal import router as journal_router
 from app.api.memory import router as memory_router
+from app.api.prompts import router as prompts_router
+from app.observability import ChatTraceService
 from app.platform.web import WebPlatformAdapter
 
 
@@ -175,6 +177,7 @@ def build_test_app(
     app.include_router(hitl_router)
     app.include_router(journal_router)
     app.include_router(memory_router)
+    app.include_router(prompts_router)
     app.state.web_platform = web_platform or WebPlatformAdapter()
     app.state.core_memory_cache = RecordingCoreMemoryCache()
     app.state.session_context_store = RecordingSessionContextStore()
@@ -188,6 +191,7 @@ def build_test_app(
     app.state.event_bus_event_factory = lambda event_type, payload: {"type": event_type, "payload": payload}
     app.state.evolution_journal = evolution_journal or StaticEvolutionJournal(items=[])
     app.state.memory_governance_service = memory_governance_service or RecordingMemoryGovernanceService()
+    app.state.chat_trace_service = ChatTraceService(emitter=app.state.web_platform.emit_trace)
     app.state.streaming_disabled = streaming_disabled
     return app
 
@@ -208,15 +212,33 @@ def test_chat_returns_structured_response_model() -> None:
     response = client.post("/chat", json={"text": "run task", "session_id": "session-1", "user_id": "user-1"})
 
     assert response.status_code == 200
-    assert response.json() == {
-        "reply": "Task dispatched. Waiting for asynchronous execution.",
-        "session_id": "session-1",
-        "user_id": "user-1",
-        "status": "accepted",
-        "meta": {"task_id": "task-42"},
-    }
+    body = response.json()
+    assert body["reply"] == "Task dispatched. Waiting for asynchronous execution."
+    assert body["session_id"] == "session-1"
+    assert body["user_id"] == "user-1"
+    assert body["status"] == "accepted"
+    assert body["meta"]["task_id"] == "task-42"
+    assert body["meta"]["trace_id"]
+    assert body["trace"] is None
     assert app.state.core_memory_cache.active_sessions == [("user-1", "session-1")]
     assert len(app.state.session_context_store.messages) == 2
+
+
+def test_chat_can_return_trace_when_requested() -> None:
+    app = build_test_app()
+    client = TestClient(app)
+
+    response = client.post(
+        "/chat",
+        json={"text": "hello", "session_id": "session-1", "user_id": "user-1", "include_trace": True},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["meta"]["trace_id"]
+    assert body["trace"]["session_id"] == "session-1"
+    assert body["trace"]["status"] == "completed"
+    assert len(body["trace"]["steps"]) >= 3
 
 
 def test_chat_rejects_empty_text_and_session_id() -> None:
@@ -282,6 +304,33 @@ def test_chat_stream_emits_expected_sse_event_sequence() -> None:
     assert '"content": "hello world"' in body
     assert "event: done" in body
     assert '"status": "done"' in body
+
+
+def test_chat_trace_returns_latest_trace_for_session() -> None:
+    app = build_test_app()
+    client = TestClient(app)
+
+    chat_response = client.post(
+        "/chat",
+        json={"text": "trace me", "session_id": "session-1", "user_id": "user-1"},
+    )
+
+    assert chat_response.status_code == 200
+    trace_response = client.get("/chat/trace", params={"session_id": "session-1"})
+
+    assert trace_response.status_code == 200
+    assert trace_response.json()["session_id"] == "session-1"
+    assert trace_response.json()["status"] == "completed"
+
+
+def test_chat_trace_returns_404_when_missing() -> None:
+    app = build_test_app()
+    client = TestClient(app)
+
+    response = client.get("/chat/trace", params={"session_id": "missing"})
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "trace_not_found"
 
 
 def test_hitl_respond_returns_structured_response() -> None:
@@ -452,3 +501,34 @@ def test_memory_routes_return_404_for_missing_memory_key() -> None:
 
     assert correct_response.status_code == 404
     assert delete_response.status_code == 404
+
+
+def test_prompt_routes_return_core_templates() -> None:
+    app = build_test_app()
+    client = TestClient(app)
+
+    list_response = client.get("/prompts")
+    item_response = client.get("/prompts/soul_core_system")
+
+    assert list_response.status_code == 200
+    assert list_response.json()["count"] >= 2
+    assert any(item["key"] == "soul_core_system" for item in list_response.json()["items"])
+    assert item_response.status_code == 200
+    assert item_response.json()["key"] == "soul_core_system"
+    assert "## Self Cognition" in item_response.json()["content"]
+
+
+def test_prompt_routes_return_404_for_missing_template() -> None:
+    app = build_test_app()
+    client = TestClient(app)
+
+    response = client.get("/prompts/missing_key")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "code": "prompt_not_found",
+            "message": "No prompt template exists for the provided key.",
+            "details": {"key": "missing_key"},
+        }
+    }

@@ -62,6 +62,9 @@ class WebPlatformAdapter(PlatformAdapter):
         )
         await self._broadcast(ctx.session_id, {"event": "done", "data": {"status": "waiting_hitl"}})
 
+    async def emit_trace(self, session_id: str, trace: dict[str, Any]) -> None:
+        await self._broadcast(session_id, {"event": "trace", "data": trace})
+
     def subscribe(self, session_id: str) -> asyncio.Queue[dict[str, Any]]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._queues[session_id].append(queue)
