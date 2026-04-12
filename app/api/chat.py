@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from app.api.models import (
     APIModel,
     ApiErrorResponse,
+    ChatBrainResponse,
     ChatMetaResponse,
     ChatResponse,
     ChatTraceResponse,
@@ -18,6 +19,7 @@ from app.api.models import (
     OptionalNonEmptyStr,
     api_error_response,
 )
+from app.platform.base import OutboundMessage
 
 
 router = APIRouter(tags=["chat"])
@@ -45,6 +47,7 @@ async def chat(request: Request, payload: ChatRequest) -> ChatResponse | Any:
             "capabilities": ["streaming"],
         }
     )
+
     trace = await app_state.chat_trace_service.start_trace(
         user_id=inbound.user_id,
         session_id=inbound.session_id,
@@ -69,7 +72,15 @@ async def chat(request: Request, payload: ChatRequest) -> ChatResponse | Any:
         title="User message appended to session context",
         data={"role": "user", "content_preview": inbound.text[:200]},
     )
-    action = await app_state.soul_engine.run(inbound)
+    async def stream_delta(delta: str) -> None:
+        if not delta:
+            return
+        await app_state.web_platform.send_outbound(
+            inbound.platform_ctx,
+            OutboundMessage(type="stream", content=delta),
+        )
+
+    action = await app_state.soul_engine.run(inbound, on_direct_reply_delta=stream_delta)
     result = await app_state.action_router.route(action, inbound)
     if result is None:
         await app_state.chat_trace_service.finish_trace(
@@ -111,6 +122,7 @@ async def chat(request: Request, payload: ChatRequest) -> ChatResponse | Any:
         status=status,
         meta=meta,
         trace=ChatTraceResponse.model_validate(final_trace) if payload.include_trace and final_trace else None,
+        brain=ChatBrainResponse.model_validate(result["brain"]) if result.get("brain") else None,
     )
 
 
@@ -122,6 +134,7 @@ async def chat(request: Request, payload: ChatRequest) -> ChatResponse | Any:
 async def chat_stream(
     request: Request,
     session_id: Annotated[str, Query(min_length=1)],
+    user_id: Annotated[str | None, Query(min_length=1)] = None,
 ) -> StreamingResponse | Any:
     app_state = request.app.state
     if app_state.streaming_disabled:
@@ -132,7 +145,23 @@ async def chat_stream(
             details={"session_id": session_id},
         )
 
+    if user_id and hasattr(app_state.web_platform, "register_session"):
+        app_state.web_platform.register_session(
+            user_id=user_id,
+            session_id=session_id,
+            capabilities={"streaming"},
+        )
     queue = app_state.web_platform.subscribe(session_id)
+    if user_id and hasattr(app_state, "proactivity_service"):
+        ctx = None
+        if hasattr(app_state.web_platform, "resolve_context_for_user"):
+            ctx = app_state.web_platform.resolve_context_for_user(user_id)
+        if ctx is not None:
+            await app_state.proactivity_service.deliver_follow_up(
+                user_id=user_id,
+                ctx=ctx,
+                platform_adapter=app_state.web_platform,
+            )
 
     async def event_generator():
         try:

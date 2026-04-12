@@ -41,17 +41,62 @@ class DummyVectorRetriever:
         return {"matches": list(self.matches)}
 
 
+class DummyMidTermMemoryStore:
+    def __init__(self, items: list[Any] | None = None) -> None:
+        self.items = items or []
+        self.degraded = False
+        self.degraded_reason: str | None = None
+        self.storage_source = "postgres"
+
+    async def retrieve(self, user_id: str, query: str, limit: int = 5) -> list[Any]:
+        return list(self.items)[:limit]
+
+    async def list_items(self, *, user_id: str, include_expired: bool = False, statuses: set[str] | None = None) -> list[Any]:
+        return list(self.items)
+
+    async def suppress_related(
+        self,
+        *,
+        user_id: str,
+        memory_key: str | None = None,
+        content: str | None = None,
+        reason: str = "",
+    ) -> list[str]:
+        return [memory_key] if memory_key else []
+
+    async def mark_promoted(self, *, user_id: str, memory_key: str, promoted_memory_key: str) -> None:
+        return None
+
+
 class DummyChatModel:
-    def __init__(self, response: Any = None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        response: Any = None,
+        error: Exception | None = None,
+        stream_chunks: list[Any] | None = None,
+        stream_error: Exception | None = None,
+    ) -> None:
         self.response = response
         self.error = error
+        self.stream_chunks = stream_chunks
+        self.stream_error = stream_error
         self.calls: list[list[dict[str, Any]]] = []
+        self.stream_calls: list[list[dict[str, Any]]] = []
 
     async def generate(self, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
         self.calls.append(messages)
         if self.error is not None:
             raise self.error
         return self.response
+
+    async def stream(self, messages: list[dict[str, Any]], **kwargs: Any):
+        self.stream_calls.append(messages)
+        if self.stream_error is not None:
+            raise self.stream_error
+        if self.stream_chunks is None:
+            raise NotImplementedError
+        for chunk in self.stream_chunks:
+            yield chunk
 
 
 class DummyModelRegistry:

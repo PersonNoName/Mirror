@@ -26,6 +26,7 @@ RelationshipStage = Literal[
 ProactivityPreference = Literal["allow", "suppress", "unknown"]
 TopicImportance = Literal["low", "medium", "high"]
 ProactivityOpportunityStatus = Literal["pending", "sent", "suppressed"]
+ContinuityLevel = Literal["low", "medium", "high"]
 
 
 def utc_now_iso() -> str:
@@ -230,6 +231,39 @@ class SessionAdaptation:
 
 
 @dataclass(slots=True)
+class UserEmotionalState:
+    """Durable cross-session emotional carryover state for the user."""
+
+    emotion_class: str = "neutral"
+    intensity: ContinuityLevel = "low"
+    emotional_risk: str = "low"
+    support_mode: str = "blended"
+    support_preference: str = "unknown"
+    stability: str = "stable"
+    unresolved_topics: list[str] = field(default_factory=list)
+    carryover_summary: str = ""
+    last_observed_at: str = ""
+    carryover_until: str = ""
+    updated_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(slots=True)
+class AgentContinuityState:
+    """Durable cross-session continuity state for the agent."""
+
+    caution_level: ContinuityLevel = "low"
+    warmth_level: ContinuityLevel = "medium"
+    repair_mode: bool = False
+    recovery_mode: bool = False
+    relational_confidence: float = 0.5
+    continuity_summary: str = ""
+    active_signals: list[str] = field(default_factory=list)
+    last_event_at: str = ""
+    last_shift_reason: str = ""
+    updated_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(slots=True)
 class SelfCognition:
     """Persistent self-model maintained per user."""
 
@@ -286,6 +320,8 @@ class CoreMemory:
     world_model: WorldModel = field(default_factory=WorldModel)
     personality: PersonalityState = field(default_factory=PersonalityState)
     task_experience: TaskExperience = field(default_factory=TaskExperience)
+    user_emotional_state: UserEmotionalState = field(default_factory=UserEmotionalState)
+    agent_continuity_state: AgentContinuityState = field(default_factory=AgentContinuityState)
 
 
 class CoreMemoryCache:

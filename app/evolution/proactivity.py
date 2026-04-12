@@ -10,13 +10,16 @@ from typing import Any
 
 from app.evolution.event_bus import EvolutionEntry
 from app.memory.core_memory import (
+    AgentContinuityState,
     CoreMemory,
     ProactivityOpportunity,
     ProactivityPreference,
     ProactivityState,
+    UserEmotionalState,
     WorldModel,
     utc_now_iso,
 )
+from app.platform.base import OutboundMessage, PlatformContext
 
 
 def _parse_iso(value: str) -> datetime | None:
@@ -38,6 +41,7 @@ class ProactivityDecision:
     relationship_stage: str = "unfamiliar"
     stored_preference: str = "unknown"
     conservative_reference: str = ""
+    session_id: str = ""
 
 
 class GentleProactivityService:
@@ -122,6 +126,8 @@ class GentleProactivityService:
         stage = world_model.relationship_stage.stage
         preference = self._resolve_preference(world_model)
         opportunities = [item for item in self._prune_opportunities(state.pending_opportunities) if item.status == "pending"]
+        user_emotional_state = self._effective_user_emotional_state(current.user_emotional_state, now=now)
+        agent_continuity_state = self._effective_agent_continuity_state(current.agent_continuity_state, now=now)
 
         if not policy.enabled:
             return self._decision(False, "proactivity_disabled", stage, preference)
@@ -132,6 +138,26 @@ class GentleProactivityService:
             return self._decision(False, "no_pending_topic", stage, preference)
 
         candidate = self._select_opportunity(opportunities)
+        if agent_continuity_state is not None and agent_continuity_state.repair_mode:
+            state.last_suppression_reason = "agent_repair_mode_active"
+            return self._decision(False, "agent_repair_mode_active", stage, preference, candidate)
+        if (
+            agent_continuity_state is not None
+            and agent_continuity_state.caution_level == "high"
+            and candidate.importance != "high"
+        ):
+            state.last_suppression_reason = "agent_caution_requires_high_importance"
+            return self._decision(False, "agent_caution_requires_high_importance", stage, preference, candidate)
+        if user_emotional_state is not None and user_emotional_state.emotional_risk in {"medium", "high"}:
+            state.last_suppression_reason = "emotional_risk_active"
+            return self._decision(False, "emotional_risk_active", stage, preference, candidate)
+        if (
+            user_emotional_state is not None
+            and user_emotional_state.intensity == "high"
+            and candidate.importance != "high"
+        ):
+            state.last_suppression_reason = "emotional_carryover_requires_high_importance"
+            return self._decision(False, "emotional_carryover_requires_high_importance", stage, preference, candidate)
         if stage == "unfamiliar":
             state.last_suppression_reason = "relationship_stage_unfamiliar"
             return self._decision(False, "relationship_stage_unfamiliar", stage, preference, candidate)
@@ -151,7 +177,12 @@ class GentleProactivityService:
             state.last_suppression_reason = "frequency_cap_reached"
             return self._decision(False, "frequency_cap_reached", stage, preference, candidate)
 
-        draft = self._draft_follow_up(candidate, stage=stage)
+        draft = self._draft_follow_up(
+            candidate,
+            stage=stage,
+            user_emotional_state=user_emotional_state,
+            agent_continuity_state=agent_continuity_state,
+        )
         return self._decision(True, "eligible", stage, preference, candidate, draft_message=draft)
 
     async def mark_follow_up_sent(
@@ -186,20 +217,64 @@ class GentleProactivityService:
             details={"topic_key": topic_key},
         )
 
+    async def deliver_follow_up(
+        self,
+        *,
+        user_id: str,
+        ctx: PlatformContext,
+        platform_adapter: Any,
+        now: datetime | None = None,
+        event_id: str | None = None,
+    ) -> ProactivityDecision:
+        decision = await self.plan_follow_up(user_id=user_id, now=now)
+        if not decision.eligible:
+            return decision
+        await platform_adapter.send_outbound(
+            ctx,
+            OutboundMessage(
+                type="text",
+                content=decision.draft_message,
+                metadata={
+                    "proactive": True,
+                    "topic_key": decision.topic_key,
+                    "importance": decision.importance,
+                    "relationship_stage": decision.relationship_stage,
+                },
+            ),
+        )
+        await self.mark_follow_up_sent(
+            user_id=user_id,
+            topic_key=decision.topic_key,
+            now=now,
+            event_id=event_id,
+        )
+        return decision
+
     def prompt_policy_snapshot(self, core_memory: CoreMemory) -> dict[str, Any]:
         world_model = core_memory.world_model
         state = world_model.proactivity_state
         preference = self._resolve_preference(world_model)
         pending = [item for item in self._prune_opportunities(state.pending_opportunities) if item.status == "pending"]
+        user_emotional_state = self._effective_user_emotional_state(core_memory.user_emotional_state)
+        agent_continuity_state = self._effective_agent_continuity_state(core_memory.agent_continuity_state)
+        policy_hint = "Only follow up when relationship stage allows it, the topic is important, and throttle windows are clear."
+        if user_emotional_state is not None and user_emotional_state.intensity in {"medium", "high"}:
+            policy_hint += " Delay outreach when unresolved emotional carryover is still hot unless the topic is important."
+        if agent_continuity_state is not None and agent_continuity_state.caution_level == "high":
+            policy_hint += " Agent caution is elevated, so proactive outreach should be rarer and more conservative."
         return {
             "enabled": world_model.proactivity_policy.enabled,
             "stored_preference": preference,
             "last_proactive_at": state.last_proactive_at or "never",
             "pending_followup_count": len(pending),
             "last_suppression_reason": state.last_suppression_reason or "none",
-            "policy_hint": (
-                "Only follow up when relationship stage allows it, the topic is important, and throttle windows are clear."
+            "emotional_carryover": (
+                user_emotional_state.emotion_class if user_emotional_state is not None else "none"
             ),
+            "agent_caution_level": (
+                agent_continuity_state.caution_level if agent_continuity_state is not None else "low"
+            ),
+            "policy_hint": policy_hint,
         }
 
     def summary(self) -> dict[str, Any]:
@@ -411,16 +486,96 @@ class GentleProactivityService:
         return recent >= max_followups
 
     @staticmethod
-    def _draft_follow_up(opportunity: ProactivityOpportunity, *, stage: str) -> str:
-        if stage == "vulnerable_support":
+    def _draft_follow_up(
+        opportunity: ProactivityOpportunity,
+        *,
+        stage: str,
+        user_emotional_state: UserEmotionalState | None = None,
+        agent_continuity_state: AgentContinuityState | None = None,
+    ) -> str:
+        if (
+            user_emotional_state is not None
+            and user_emotional_state.support_mode == "listening"
+        ) or stage == "vulnerable_support":
             return (
                 f"Earlier you mentioned {opportunity.conservative_reference}. "
                 "No pressure to reply if you'd rather not, but how is that feeling now?"
+            )
+        if agent_continuity_state is not None and agent_continuity_state.caution_level == "high":
+            return (
+                f"Earlier you mentioned {opportunity.conservative_reference}. "
+                "No need to reply if you'd rather leave it there, but I wanted to check in gently on how it's going."
             )
         return (
             f"Earlier you mentioned {opportunity.conservative_reference}. "
             "No pressure to reply, but I wanted to check in on how that's going."
         )
+
+    @staticmethod
+    def _effective_user_emotional_state(
+        state: UserEmotionalState,
+        *,
+        now: datetime | None = None,
+    ) -> UserEmotionalState | None:
+        if not state.last_observed_at and not state.carryover_until:
+            return None
+        current = now or datetime.now(timezone.utc)
+        carryover_until = _parse_iso(state.carryover_until)
+        if carryover_until is not None:
+            if carryover_until.tzinfo is None:
+                carryover_until = carryover_until.replace(tzinfo=timezone.utc)
+            if carryover_until < current:
+                return None
+            return state
+        observed_at = _parse_iso(state.last_observed_at)
+        if observed_at is None:
+            return None
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        return state if observed_at >= current - timedelta(days=7) else None
+
+    @staticmethod
+    def _effective_agent_continuity_state(
+        state: AgentContinuityState,
+        *,
+        now: datetime | None = None,
+    ) -> AgentContinuityState | None:
+        """Return agent continuity with gradual decay (matches SoulEngine).
+
+        - Days 0-3: full state as-is
+        - Days 3-7: caution_level is reduced, repair_mode cleared
+        - Day 7+: returns None
+        """
+        if (
+            not state.last_event_at
+            and not state.active_signals
+            and not state.last_shift_reason
+            and not state.continuity_summary
+        ):
+            return None
+        current = now or datetime.now(timezone.utc)
+        event_at = _parse_iso(state.last_event_at or state.updated_at)
+        if event_at is None:
+            return None
+        if event_at.tzinfo is None:
+            event_at = event_at.replace(tzinfo=timezone.utc)
+        elapsed = current - event_at
+        if elapsed > timedelta(days=7):
+            return None
+        # Gradual decay: after 3 days, start reducing caution
+        if elapsed > timedelta(days=3):
+            from copy import copy
+            decayed = copy(state)
+            if decayed.caution_level == "high":
+                decayed.caution_level = "medium"
+            elif decayed.caution_level == "medium":
+                decayed.caution_level = "low"
+            decayed.repair_mode = False
+            decayed.relational_confidence = min(
+                0.7, decayed.relational_confidence + 0.1
+            )
+            return decayed
+        return state
 
     @staticmethod
     def _decision(
@@ -441,6 +596,7 @@ class GentleProactivityService:
             relationship_stage=stage,
             stored_preference=preference,
             conservative_reference=opportunity.conservative_reference if opportunity is not None else "",
+            session_id=opportunity.session_id if opportunity is not None else "",
         )
 
     async def _record(

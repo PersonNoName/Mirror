@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Mirror API",
-    "description": "Mirror - 本地优先 AI Agent 运行时 API",
+    "description": "Mirror 本地优先 AI Agent 运行时 API",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -13,7 +13,6 @@
   "item": [
     {
       "name": "健康检查",
-      "event": [],
       "request": {
         "method": "GET",
         "header": [],
@@ -27,8 +26,7 @@
       "response": []
     },
     {
-      "name": "对话",
-      "event": [],
+      "name": "同步对话",
       "request": {
         "method": "POST",
         "header": [
@@ -39,7 +37,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n    \"text\": \"你好\",\n    \"session_id\": \"test-session-1\",\n    \"user_id\": \"user-1\"\n}"
+          "raw": "{\n  \"text\": \"你好\",\n  \"session_id\": \"test-session-1\",\n  \"user_id\": \"user-1\"\n}"
         },
         "url": {
           "raw": "{{baseUrl}}/chat",
@@ -52,7 +50,6 @@
     },
     {
       "name": "流式对话",
-      "event": [],
       "request": {
         "method": "GET",
         "header": [],
@@ -74,12 +71,11 @@
     },
     {
       "name": "查看记忆列表",
-      "event": [],
       "request": {
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "{{baseUrl}}/memory?user_id=user-1",
+          "raw": "{{baseUrl}}/memory?user_id=user-1&include_candidates=true&include_superseded=false&include_mid_term=true",
           "host": ["{{baseUrl}}"],
           "path": ["memory"],
           "query": [
@@ -91,22 +87,78 @@
             {
               "key": "include_candidates",
               "value": "true",
-              "description": "包含候选记忆"
+              "description": "是否包含候选记忆"
             },
             {
               "key": "include_superseded",
               "value": "false",
-              "description": "包含被取代的记忆"
+              "description": "是否包含已被替代/删除的记忆"
+            },
+            {
+              "key": "include_mid_term",
+              "value": "true",
+              "description": "是否包含跨 session 的中期记忆"
             }
           ]
         },
-        "description": "查看用户记忆列表"
+        "description": "查看用户可治理记忆列表"
+      },
+      "response": []
+    },
+    {
+      "name": "查看中期记忆",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/memory/mid-term?user_id=user-1&include_expired=false",
+          "host": ["{{baseUrl}}"],
+          "path": ["memory", "mid-term"],
+          "query": [
+            {
+              "key": "user_id",
+              "value": "user-1",
+              "description": "用户ID"
+            },
+            {
+              "key": "include_expired",
+              "value": "false",
+              "description": "是否包含已过期的中期记忆"
+            }
+          ]
+        },
+        "description": "查看用户跨 session 的中期记忆列表"
+      },
+      "response": []
+    },
+    {
+      "name": "查看对话片段回忆",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/memory/conversation-episodes?user_id=user-1&limit=20",
+          "host": ["{{baseUrl}}"],
+          "path": ["memory", "conversation-episodes"],
+          "query": [
+            {
+              "key": "user_id",
+              "value": "user-1",
+              "description": "用户ID"
+            },
+            {
+              "key": "limit",
+              "value": "20",
+              "description": "返回条数，范围 1-100"
+            }
+          ]
+        },
+        "description": "查看 conversation_episode 中保存的历史对话摘要片段"
       },
       "response": []
     },
     {
       "name": "查看记忆治理策略",
-      "event": [],
       "request": {
         "method": "GET",
         "header": [],
@@ -122,13 +174,12 @@
             }
           ]
         },
-        "description": "查看记忆治理策略"
+        "description": "查看用户当前记忆治理策略"
       },
       "response": []
     },
     {
       "name": "阻止记忆学习",
-      "event": [],
       "request": {
         "method": "POST",
         "header": [
@@ -139,7 +190,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n    \"user_id\": \"user-1\",\n    \"content_class\": \"support_preference\",\n    \"blocked\": true\n}"
+          "raw": "{\n  \"user_id\": \"user-1\",\n  \"content_class\": \"support_preference\",\n  \"blocked\": true\n}"
         },
         "url": {
           "raw": "{{baseUrl}}/memory/governance/block",
@@ -152,7 +203,6 @@
     },
     {
       "name": "修正记忆",
-      "event": [],
       "request": {
         "method": "POST",
         "header": [
@@ -163,20 +213,19 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n    \"user_id\": \"user-1\",\n    \"memory_key\": \"inference:tone:direct\",\n    \"corrected_content\": \"用户更喜欢详细谨慎的回答\",\n    \"truth_type\": \"fact\"\n}"
+          "raw": "{\n  \"user_id\": \"user-1\",\n  \"memory_key\": \"inference:tone:direct\",\n  \"corrected_content\": \"用户更喜欢详细谨慎的回答\",\n  \"truth_type\": \"fact\"\n}"
         },
         "url": {
           "raw": "{{baseUrl}}/memory/correct",
           "host": ["{{baseUrl}}"],
           "path": ["memory", "correct"]
         },
-        "description": "修正记忆内容"
+        "description": "修正指定记忆内容"
       },
       "response": []
     },
     {
-      "name": "删除记忆",
-      "event": [],
+      "name": "删除长期记忆",
       "request": {
         "method": "POST",
         "header": [
@@ -187,20 +236,42 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n    \"user_id\": \"user-1\",\n    \"memory_key\": \"fact:tone:direct\",\n    \"reason\": \"信息有误\"\n}"
+          "raw": "{\n  \"user_id\": \"user-1\",\n  \"memory_key\": \"fact:tone:direct\",\n  \"reason\": \"信息有误\"\n}"
         },
         "url": {
           "raw": "{{baseUrl}}/memory/delete",
           "host": ["{{baseUrl}}"],
           "path": ["memory", "delete"]
         },
-        "description": "删除指定记忆"
+        "description": "删除指定长期记忆"
+      },
+      "response": []
+    },
+    {
+      "name": "删除中期记忆",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"user_id\": \"user-1\",\n  \"memory_key\": \"mid_term:project:mirror_memory_rollout\",\n  \"reason\": \"不再需要保留这个近期上下文\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/memory/mid-term/delete",
+          "host": ["{{baseUrl}}"],
+          "path": ["memory", "mid-term", "delete"]
+        },
+        "description": "删除或压制中期记忆，避免再次召回或晋升"
       },
       "response": []
     },
     {
       "name": "查看进化日志",
-      "event": [],
       "request": {
         "method": "GET",
         "header": [],
@@ -217,17 +288,16 @@
             {
               "key": "limit",
               "value": "10",
-              "description": "返回条数限制"
+              "description": "返回条数上限"
             }
           ]
         },
-        "description": "查看进化日志"
+        "description": "查看系统进化日志"
       },
       "response": []
     },
     {
       "name": "HITL 任务响应",
-      "event": [],
       "request": {
         "method": "POST",
         "header": [
@@ -238,14 +308,14 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n    \"task_id\": \"task-1\",\n    \"decision\": \"approve\",\n    \"payload\": {\n        \"safe\": true\n    }\n}"
+          "raw": "{\n  \"task_id\": \"task-1\",\n  \"decision\": \"approve\",\n  \"payload\": {\n    \"safe\": true\n  }\n}"
         },
         "url": {
           "raw": "{{baseUrl}}/hitl/respond",
           "host": ["{{baseUrl}}"],
           "path": ["hitl", "respond"]
         },
-        "description": "人工审批 HITL 任务 (decision: approve/reject/defer)"
+        "description": "人工审批 HITL 任务，decision 可选 approve/reject/defer"
       },
       "response": []
     }

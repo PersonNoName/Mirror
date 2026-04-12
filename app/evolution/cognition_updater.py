@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.evolution.candidate_pipeline import (
@@ -12,10 +12,12 @@ from app.evolution.candidate_pipeline import (
     EvolutionCandidateManager,
 )
 from app.memory.core_memory import (
+    AgentContinuityState,
     DurableMemory,
     FactualMemory,
     InferredMemory,
     RelationshipMemory,
+    UserEmotionalState,
     utc_now_iso,
 )
 from app.platform.base import HitlRequest
@@ -41,6 +43,7 @@ class CognitionUpdater:
         candidate_manager: EvolutionCandidateManager | None = None,
         relationship_state_machine: Any | None = None,
         memory_governance_service: Any | None = None,
+        mid_term_memory_store: Any | None = None,
     ) -> None:
         self.core_memory_cache = core_memory_cache
         self.core_memory_scheduler = core_memory_scheduler
@@ -50,6 +53,7 @@ class CognitionUpdater:
         self.candidate_manager = candidate_manager
         self.relationship_state_machine = relationship_state_machine
         self.memory_governance_service = memory_governance_service
+        self.mid_term_memory_store = mid_term_memory_store
         self._last_updated: dict[str, datetime] = {}
 
     async def handle_lesson_generated(self, event: Any) -> None:
@@ -124,12 +128,14 @@ class CognitionUpdater:
                 )
             elif isinstance(candidate, RelationshipMemory):
                 await self._promote_relationship(user_id, candidate)
+            await self._mark_mid_term_item_promoted(user_id, candidate)
             task.status = "done"
         elif decision == "reject":
             candidate.status = "superseded"
             world_model.memory_conflicts = self._merge_memory(
                 world_model.memory_conflicts, candidate
             )
+            await self._suppress_mid_term_item(user_id, candidate, reason="memory_confirmation_rejected")
             task.status = "done"
         else:
             pending.append(candidate)
@@ -172,6 +178,9 @@ class CognitionUpdater:
             await self.candidate_manager.mark_applied(candidate.id)
             task.status = "done"
         elif decision == "reject":
+            memory = self._memory_from_dict(dict(candidate.proposed_change.get("memory", {})))
+            if memory is not None:
+                await self._suppress_mid_term_item(user_id, memory, reason="evolution_rejected")
             await self.candidate_manager.mark_reverted(candidate.id, "hitl_rejected")
             task.status = "done"
         else:
@@ -265,6 +274,12 @@ class CognitionUpdater:
         )
 
     async def _update_world_model(self, lesson: Lesson) -> None:
+        if lesson.domain == "emotional_continuity":
+            await self._apply_user_emotional_state(lesson)
+            return
+        if lesson.domain == "agent_continuity":
+            await self._apply_agent_continuity_state(lesson)
+            return
         candidate = self._classify_memory(lesson)
         if self.memory_governance_service is not None:
             current = deepcopy(await self.core_memory_cache.get(lesson.user_id))
@@ -351,6 +366,121 @@ class CognitionUpdater:
                 event_id=lesson.id,
             )
 
+    async def _apply_user_emotional_state(self, lesson: Lesson) -> None:
+        current = deepcopy(await self.core_memory_cache.get(lesson.user_id))
+        previous = current.user_emotional_state
+        details = dict(lesson.details)
+        if lesson.category == "emotional_resolution":
+            # Grace period: keep a faint trace for 24h so the next session
+            # can still gently reference "you mentioned you were feeling better".
+            now = datetime.now(timezone.utc)
+            grace_until = (now + timedelta(hours=24)).isoformat()
+            current.user_emotional_state = UserEmotionalState(
+                emotion_class="neutral",
+                intensity="low",
+                emotional_risk="low",
+                support_mode="blended",
+                support_preference=previous.support_preference if previous.support_preference != "unknown" else "unknown",
+                stability="resolved",
+                unresolved_topics=[],
+                carryover_summary=str(lesson.summary or "Recent emotional carryover appears resolved."),
+                last_observed_at=utc_now_iso(),
+                carryover_until=grace_until,
+                updated_at=utc_now_iso(),
+            )
+        else:
+            now = datetime.now(timezone.utc)
+            carryover_until = (now + timedelta(days=7)).isoformat()
+
+            # Merge unresolved_topics with previous topics instead of
+            # replacing, so that multiple emotional threads within the
+            # same session are all preserved.
+            new_topics = list(details.get("unresolved_topics", []))
+            merged_topics = list(new_topics)
+            for topic in previous.unresolved_topics:
+                if topic and topic not in merged_topics:
+                    merged_topics.append(topic)
+            merged_topics = merged_topics[:5]
+
+            # Keep the more severe emotion class when merging
+            severity = {
+                "neutral": 0, "relief": 0, "joy": 0,
+                "frustration": 1, "anger": 2,
+                "sadness": 3, "loneliness": 3,
+                "anxiety": 4, "overwhelm": 5,
+            }
+            new_class = str(details.get("emotion_class", "neutral"))
+            prev_class = previous.emotion_class or "neutral"
+            if severity.get(prev_class, 0) > severity.get(new_class, 0):
+                emotion_class = prev_class
+            else:
+                emotion_class = new_class
+
+            current.user_emotional_state = UserEmotionalState(
+                emotion_class=emotion_class,
+                intensity=str(details.get("intensity", previous.intensity or "low")),
+                emotional_risk=str(details.get("emotional_risk", previous.emotional_risk or "low")),
+                support_mode=str(details.get("support_mode", previous.support_mode or "blended")),
+                support_preference=str(details.get("support_preference", previous.support_preference or "unknown")),
+                stability=str(details.get("stability", "fragile")),
+                unresolved_topics=merged_topics,
+                carryover_summary=str(lesson.summary or details.get("summary") or previous.carryover_summary),
+                last_observed_at=now.isoformat(),
+                carryover_until=carryover_until,
+                updated_at=now.isoformat(),
+            )
+        await self.core_memory_scheduler.write(
+            lesson.user_id,
+            "user_emotional_state",
+            current.user_emotional_state,
+            event_id=lesson.id,
+        )
+
+    async def _apply_agent_continuity_state(self, lesson: Lesson) -> None:
+        current = deepcopy(await self.core_memory_cache.get(lesson.user_id))
+        previous = current.agent_continuity_state
+        details = dict(lesson.details)
+        now = utc_now_iso()
+        if lesson.category == "agent_state_shift":
+            current.agent_continuity_state = AgentContinuityState(
+                caution_level="high",
+                warmth_level="medium" if previous.warmth_level == "low" else previous.warmth_level,
+                repair_mode=True,
+                recovery_mode=False,
+                relational_confidence=max(0.2, previous.relational_confidence - 0.15),
+                continuity_summary=str(lesson.summary or details.get("summary_hint") or previous.continuity_summary),
+                active_signals=self._merge_signals(previous.active_signals, str(details.get("active_signal", "task_failure"))),
+                last_event_at=now,
+                last_shift_reason=str(details.get("summary_hint", lesson.summary)),
+                updated_at=now,
+            )
+        else:
+            current.agent_continuity_state = AgentContinuityState(
+                caution_level="medium" if previous.caution_level == "high" else "low",
+                warmth_level=previous.warmth_level if previous.warmth_level != "low" else "medium",
+                repair_mode=False,
+                recovery_mode=True,
+                relational_confidence=min(0.9, previous.relational_confidence + 0.1),
+                continuity_summary=str(lesson.summary or details.get("summary_hint") or "Agent continuity is recovering."),
+                active_signals=self._merge_signals(previous.active_signals, str(details.get("active_signal", "task_success"))),
+                last_event_at=now,
+                last_shift_reason=str(details.get("summary_hint", lesson.summary)),
+                updated_at=now,
+            )
+        await self.core_memory_scheduler.write(
+            lesson.user_id,
+            "agent_continuity_state",
+            current.agent_continuity_state,
+            event_id=lesson.id,
+        )
+
+    @staticmethod
+    def _merge_signals(existing: list[str], signal: str) -> list[str]:
+        merged = [item for item in existing if item and item != signal]
+        if signal:
+            merged.insert(0, signal)
+        return merged[:4]
+
     async def _apply_world_model_candidate(
         self,
         user_id: str,
@@ -405,6 +535,8 @@ class CognitionUpdater:
         await self.core_memory_scheduler.write(
             user_id, "world_model", world_model, event_id=event_id
         )
+        if candidate.status != "conflicted":
+            await self._mark_mid_term_item_promoted(user_id, candidate)
         if self.relationship_state_machine is not None:
             await self.relationship_state_machine.evaluate(
                 user_id=user_id, event_id=event_id
@@ -642,7 +774,15 @@ class CognitionUpdater:
             status="active",
             sensitivity=sensitivity,
             memory_key=f"inference:{lesson.domain}:{content.lower()}",
-            metadata={"lesson_id": lesson.id, "category": lesson.category},
+            metadata={
+                "lesson_id": lesson.id,
+                "category": lesson.category,
+                **(
+                    {"mid_term_memory_key": str(lesson.details.get("mid_term_memory_key", ""))}
+                    if lesson.details.get("mid_term_memory_key")
+                    else {}
+                ),
+            },
         )
 
     def _requires_confirmation(self, candidate: DurableMemory) -> bool:
@@ -816,6 +956,30 @@ class CognitionUpdater:
         if truth_type == "fact":
             return FactualMemory(**data)
         return None
+
+    async def _mark_mid_term_item_promoted(self, user_id: str, candidate: DurableMemory) -> None:
+        if self.mid_term_memory_store is None:
+            return
+        mid_term_memory_key = str(candidate.metadata.get("mid_term_memory_key", ""))
+        if not mid_term_memory_key:
+            return
+        await self.mid_term_memory_store.mark_promoted(
+            user_id=user_id,
+            memory_key=mid_term_memory_key,
+            promoted_memory_key=candidate.memory_key,
+        )
+
+    async def _suppress_mid_term_item(self, user_id: str, candidate: DurableMemory, *, reason: str) -> None:
+        if self.mid_term_memory_store is None:
+            return
+        mid_term_memory_key = str(candidate.metadata.get("mid_term_memory_key", ""))
+        if not mid_term_memory_key:
+            return
+        await self.mid_term_memory_store.suppress_related(
+            user_id=user_id,
+            memory_key=mid_term_memory_key,
+            reason=reason,
+        )
 
     @staticmethod
     def _relationship_observation(lesson: Lesson) -> dict[str, Any]:

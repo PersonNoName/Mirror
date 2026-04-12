@@ -10,6 +10,7 @@ import asyncpg
 
 from app.config import settings
 from app.memory.core_memory import (
+    AgentContinuityState,
     BehavioralRule,
     CapabilityEntry,
     CorePersonality,
@@ -29,6 +30,7 @@ from app.memory.core_memory import (
     SessionAdaptation,
     SelfCognition,
     TaskExperience,
+    UserEmotionalState,
     WorldModel,
 )
 
@@ -158,6 +160,37 @@ def _session_adaptation_from_dict(data: dict[str, Any]) -> SessionAdaptation:
     )
 
 
+def _user_emotional_state_from_dict(data: dict[str, Any]) -> UserEmotionalState:
+    return UserEmotionalState(
+        emotion_class=str(data.get("emotion_class", "neutral")),
+        intensity=str(data.get("intensity", "low")),
+        emotional_risk=str(data.get("emotional_risk", "low")),
+        support_mode=str(data.get("support_mode", "blended")),
+        support_preference=str(data.get("support_preference", "unknown")),
+        stability=str(data.get("stability", "stable")),
+        unresolved_topics=list(data.get("unresolved_topics", [])),
+        carryover_summary=str(data.get("carryover_summary", "")),
+        last_observed_at=str(data.get("last_observed_at", "")),
+        carryover_until=str(data.get("carryover_until", "")),
+        updated_at=str(data.get("updated_at", "")) or "",
+    )
+
+
+def _agent_continuity_state_from_dict(data: dict[str, Any]) -> AgentContinuityState:
+    return AgentContinuityState(
+        caution_level=str(data.get("caution_level", "low")),
+        warmth_level=str(data.get("warmth_level", "medium")),
+        repair_mode=bool(data.get("repair_mode", False)),
+        recovery_mode=bool(data.get("recovery_mode", False)),
+        relational_confidence=float(data.get("relational_confidence", 0.5)),
+        continuity_summary=str(data.get("continuity_summary", "")),
+        active_signals=list(data.get("active_signals", [])),
+        last_event_at=str(data.get("last_event_at", "")),
+        last_shift_reason=str(data.get("last_shift_reason", "")),
+        updated_at=str(data.get("updated_at", "")) or "",
+    )
+
+
 def _memory_governance_from_dict(data: dict[str, Any]) -> MemoryGovernancePolicy:
     policy = MemoryGovernancePolicy()
     retention = dict(policy.retention_days)
@@ -255,6 +288,8 @@ def _core_memory_from_dict(data: dict[str, Any]) -> CoreMemory:
     world_model = data.get("world_model", {})
     personality = data.get("personality", {})
     task_experience = data.get("task_experience", {})
+    user_emotional_state = data.get("user_emotional_state", {})
+    agent_continuity_state = data.get("agent_continuity_state", {})
 
     return CoreMemory(
         self_cognition=SelfCognition(
@@ -357,6 +392,12 @@ def _core_memory_from_dict(data: dict[str, Any]) -> CoreMemory:
                 key: [_memory_entry_from_dict(item) for item in list(items)]
                 for key, items in dict(task_experience.get("agent_habits", {})).items()
             },
+        ),
+        user_emotional_state=_user_emotional_state_from_dict(
+            dict(user_emotional_state)
+        ),
+        agent_continuity_state=_agent_continuity_state_from_dict(
+            dict(agent_continuity_state)
         ),
     )
 

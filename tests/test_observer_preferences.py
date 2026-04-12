@@ -21,8 +21,11 @@ class DummyGraphStore:
 class DummyVectorRetriever:
     def __init__(self) -> None:
         self.upserts: list[dict[str, object]] = []
+        self.fail_namespace: str | None = None
 
     async def upsert(self, **kwargs: object) -> None:
+        if kwargs.get("namespace") == self.fail_namespace:
+            raise RuntimeError(f"failed to store {self.fail_namespace}")
         self.upserts.append(kwargs)
 
 
@@ -114,8 +117,10 @@ async def test_observer_emits_preference_lesson_from_extracted_triple() -> None:
     lesson_events = [event for event in event_bus.events if event.type == EventType.LESSON_GENERATED]
     observation_events = [event for event in event_bus.events if event.type == EventType.OBSERVATION_DONE]
 
+    assert vector_retriever.upserts[0]["namespace"] == "conversation_episode"
+    assert "Previous conversation" in str(vector_retriever.upserts[0]["content"])
+    assert vector_retriever.upserts[1]["content"] == "user PREFERS Python"
     assert graph_store.upserts[0]["object"] == "Python"
-    assert vector_retriever.upserts[0]["content"] == "user PREFERS Python"
     assert lesson_events
     lesson = lesson_events[0].payload["lesson"]
     assert lesson["domain"] == "explicit_preference"
@@ -266,3 +271,72 @@ async def test_observer_fallback_marks_summary_request_as_review_even_without_re
     assert lesson["details"]["review_source"] == "rule_fallback"
     assert lesson["details"]["review_reason"] == "quoted_or_copied_content"
     assert lesson["category"] == "observer_explicit_preference_review"
+
+
+@pytest.mark.asyncio
+async def test_observer_stores_cross_session_conversation_episode_memory() -> None:
+    vector_retriever = DummyVectorRetriever()
+    event_bus = DummyEventBus()
+    observer = ObserverEngine(
+        model_registry=DummyModelRegistry("[]"),
+        graph_store=None,
+        vector_retriever=vector_retriever,
+        event_bus=event_bus,
+    )
+
+    await observer.handle_dialogue_ended(
+        Event(
+            type=EventType.DIALOGUE_ENDED,
+            payload={
+                "user_id": "user-1",
+                "session_id": "session-42",
+                "text": "Last week I said I was nervous about the interview.",
+                "reply": "We broke the preparation into three steps.",
+            },
+        )
+    )
+    await observer._flush("user-1")
+    observer._flush_tasks["user-1"].cancel()
+    with suppress(asyncio.CancelledError):
+        await observer._flush_tasks["user-1"]
+
+    episode_upsert = vector_retriever.upserts[0]
+    assert episode_upsert["namespace"] == "conversation_episode"
+    assert episode_upsert["metadata"]["session_id"] == "session-42"
+    assert "nervous about the interview" in str(episode_upsert["content"])
+    assert "three steps" in str(episode_upsert["content"])
+
+
+@pytest.mark.asyncio
+async def test_observer_continues_flush_when_conversation_episode_store_fails() -> None:
+    vector_retriever = DummyVectorRetriever()
+    vector_retriever.fail_namespace = "conversation_episode"
+    event_bus = DummyEventBus()
+    observer = ObserverEngine(
+        model_registry=DummyModelRegistry("[]"),
+        graph_store=None,
+        vector_retriever=vector_retriever,
+        event_bus=event_bus,
+    )
+
+    await observer.handle_dialogue_ended(
+        Event(
+            type=EventType.DIALOGUE_ENDED,
+            payload={
+                "user_id": "user-1",
+                "session_id": "session-fail",
+                "text": "We talked about an interview plan.",
+                "reply": "I suggested three concrete steps.",
+            },
+        )
+    )
+    await observer._flush("user-1")
+    observer._flush_tasks["user-1"].cancel()
+    with suppress(asyncio.CancelledError):
+        await observer._flush_tasks["user-1"]
+
+    observation_events = [event for event in event_bus.events if event.type == EventType.OBSERVATION_DONE]
+
+    assert vector_retriever.upserts == []
+    assert len(observation_events) == 1
+    assert observation_events[0].payload["session_id"] == "session-fail"

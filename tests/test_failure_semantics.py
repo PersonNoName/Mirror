@@ -44,6 +44,19 @@ class RecordingOutboxStore:
     async def schedule_retry(self, event_id: str, retry_count: int, error: str | None = None) -> None:
         self.retries.append((event_id, retry_count, error))
 
+    @staticmethod
+    def from_payload(topic: str, payload: dict[str, object]) -> object:
+        return SimpleNamespace(topic=topic, payload=payload)
+
+    async def enqueue(self, event: object) -> object:
+        self.events.append(event)
+        return event
+
+
+class FailingOutboxStore(RecordingOutboxStore):
+    async def enqueue(self, event: object) -> object:
+        raise RuntimeError("outbox unavailable")
+
 
 class RecordingIdempotencyStore:
     def __init__(self, claim_result: bool = True, fail_mark_done: bool = False) -> None:
@@ -191,6 +204,42 @@ async def test_event_bus_acks_mismatched_event_type_without_invoking_handler() -
 
 
 @pytest.mark.asyncio
+async def test_event_bus_degraded_emit_dispatches_locally_and_persists_best_effort() -> None:
+    outbox = RecordingOutboxStore()
+    bus = RedisStreamsEventBus(redis_client=None, outbox_store=outbox, idempotency_store=None)
+    handled: list[str] = []
+
+    async def handler(event: Event) -> None:
+        handled.append(event.id)
+
+    await bus.subscribe("dialogue_ended", handler)
+    event = Event(type="dialogue_ended", payload={"user_id": "user-1"})
+
+    await bus.emit(event)
+
+    assert handled == [event.id]
+    assert len(outbox.events) == 1
+    assert outbox.events[0].topic == "stream:event:dialogue"
+    assert outbox.events[0].payload["event"]["id"] == event.id
+
+
+@pytest.mark.asyncio
+async def test_event_bus_degraded_emit_dispatches_locally_when_outbox_enqueue_fails() -> None:
+    bus = RedisStreamsEventBus(redis_client=None, outbox_store=FailingOutboxStore(), idempotency_store=None)
+    handled: list[str] = []
+
+    async def handler(event: Event) -> None:
+        handled.append(event.id)
+
+    await bus.subscribe("dialogue_ended", handler)
+    event = Event(type="dialogue_ended", payload={"user_id": "user-1"})
+
+    await bus.emit(event)
+
+    assert handled == [event.id]
+
+
+@pytest.mark.asyncio
 async def test_outbox_relay_does_not_mark_published_without_redis(monkeypatch: pytest.MonkeyPatch) -> None:
     event = SimpleNamespace(id="evt-1", topic="stream:test", payload={}, retry_count=0)
     store = RecordingOutboxStore(events=[event])
@@ -253,6 +302,7 @@ def test_bind_runtime_state_disables_streaming_when_redis_missing() -> None:
         core_memory_store=SimpleNamespace(),
         core_memory_cache=SimpleNamespace(),
         session_context_store=SimpleNamespace(),
+        mid_term_memory_store=SimpleNamespace(degraded=False),
         vector_retriever=None,
         graph_store=None,
         event_bus=SimpleNamespace(degraded=True),

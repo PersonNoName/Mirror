@@ -145,6 +145,22 @@ class RedisStreamsEventBus(EventBus):
 
     async def emit(self, event: Event) -> None:
         event.stream_name = self.stream_for_type(event.type)
+        if self.degraded:
+            try:
+                await self.outbox_store.enqueue(
+                    self.outbox_store.from_payload(
+                        event.stream_name, {"event": self._serialize_event(event)}
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "event_outbox_enqueue_failed",
+                    event_type=event.type,
+                    event_id=event.id,
+                    degraded=True,
+                )
+            await self._dispatch_local(event)
+            return
         await self.outbox_store.enqueue(
             self.outbox_store.from_payload(
                 event.stream_name, {"event": self._serialize_event(event)}
@@ -281,40 +297,12 @@ class RedisStreamsEventBus(EventBus):
             if not claimed:
                 await self.redis_client.xack(stream_name, group_name, delivery_id)
                 return
-        try:
-            failed_handlers: list[str] = []
-            for handler in list(self._handlers.get(event_type, [])):
-                try:
-                    await handler(event)
-                except Exception:
-                    handler_name = self._handler_name(handler)
-                    failed_handlers.append(handler_name)
-                    logger.exception(
-                        "event_handler_failed",
-                        event_type=event_type,
-                        stream_name=stream_name,
-                        delivery_id=str(delivery_id),
-                        event_id=event.id,
-                        handler=handler_name,
-                    )
-            if failed_handlers:
-                logger.warning(
-                    "event_processed_with_handler_failures",
-                    event_type=event_type,
-                    stream_name=stream_name,
-                    delivery_id=str(delivery_id),
-                    event_id=event.id,
-                    failed_handlers=failed_handlers,
-                )
-        except Exception:
-            logger.exception(
-                "event_dispatch_failed",
-                event_type=event_type,
-                stream_name=stream_name,
-                delivery_id=str(delivery_id),
-                event_id=event.id,
-            )
-            return
+        await self._dispatch_local(
+            event,
+            event_type=event_type,
+            stream_name=stream_name,
+            delivery_id=str(delivery_id),
+        )
         if self.idempotency_store is not None:
             try:
                 await self.idempotency_store.mark_done(scope, event.id)
@@ -328,6 +316,50 @@ class RedisStreamsEventBus(EventBus):
                 )
                 return
         await self.redis_client.xack(stream_name, group_name, delivery_id)
+
+    async def _dispatch_local(
+        self,
+        event: Event,
+        *,
+        event_type: str | None = None,
+        stream_name: str | None = None,
+        delivery_id: str | None = None,
+    ) -> None:
+        resolved_event_type = event_type or event.type
+        resolved_stream_name = stream_name or event.stream_name or self.stream_for_type(event.type)
+        failed_handlers: list[str] = []
+        try:
+            for handler in list(self._handlers.get(resolved_event_type, [])):
+                try:
+                    await handler(event)
+                except Exception:
+                    handler_name = self._handler_name(handler)
+                    failed_handlers.append(handler_name)
+                    logger.exception(
+                        "event_handler_failed",
+                        event_type=resolved_event_type,
+                        stream_name=resolved_stream_name,
+                        delivery_id=delivery_id,
+                        event_id=event.id,
+                        handler=handler_name,
+                    )
+            if failed_handlers:
+                logger.warning(
+                    "event_processed_with_handler_failures",
+                    event_type=resolved_event_type,
+                    stream_name=resolved_stream_name,
+                    delivery_id=delivery_id,
+                    event_id=event.id,
+                    failed_handlers=failed_handlers,
+                )
+        except Exception:
+            logger.exception(
+                "event_dispatch_failed",
+                event_type=resolved_event_type,
+                stream_name=resolved_stream_name,
+                delivery_id=delivery_id,
+                event_id=event.id,
+            )
 
     @staticmethod
     def _handler_name(handler: Any) -> str:

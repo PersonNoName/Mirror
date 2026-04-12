@@ -4,8 +4,21 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.models import ApiErrorResponse, PromptTemplateListResponse, PromptTemplateResponse, api_error_response
-from app.prompts import get_prompt_template, load_prompt_templates
+from app.api.models import (
+    ApiErrorResponse,
+    PromptTemplateListResponse,
+    PromptTemplateResponse,
+    PromptUpdateRequest,
+    api_error_response,
+)
+from app.prompts import (
+    get_prompt_template,
+    load_prompt_templates,
+    update_prompt_template,
+    get_default_prompt,
+    get_default_templates,
+    reset_prompt_template,
+)
 
 
 router = APIRouter(tags=["prompts"])
@@ -17,7 +30,23 @@ router = APIRouter(tags=["prompts"])
 )
 async def list_prompt_templates() -> PromptTemplateListResponse:
     prompts = load_prompt_templates()
-    items = [PromptTemplateResponse(key=key, content=value) for key, value in sorted(prompts.items())]
+    items = [
+        PromptTemplateResponse(key=key, content=value)
+        for key, value in sorted(prompts.items())
+    ]
+    return PromptTemplateListResponse(items=items, count=len(items))
+
+
+@router.get(
+    "/prompts/defaults",
+    response_model=PromptTemplateListResponse,
+)
+async def list_default_prompt_templates() -> PromptTemplateListResponse:
+    defaults = get_default_templates()
+    items = [
+        PromptTemplateResponse(key=key, content=value)
+        for key, value in sorted(defaults.items())
+    ]
     return PromptTemplateListResponse(items=items, count=len(items))
 
 
@@ -29,6 +58,42 @@ async def list_prompt_templates() -> PromptTemplateListResponse:
 async def get_prompt_by_key(key: str):
     try:
         content = get_prompt_template(key)
+    except KeyError:
+        return api_error_response(
+            status_code=404,
+            code="prompt_not_found",
+            message="No prompt template exists for the provided key.",
+            details={"key": key},
+        )
+    return PromptTemplateResponse(key=key, content=content)
+
+
+@router.put(
+    "/prompts/{key}",
+    response_model=PromptTemplateResponse,
+    responses={404: {"model": ApiErrorResponse}},
+)
+async def update_prompt(key: str, payload: PromptUpdateRequest):
+    try:
+        update_prompt_template(key, payload.content)
+    except KeyError:
+        return api_error_response(
+            status_code=404,
+            code="prompt_not_found",
+            message="No prompt template exists for the provided key.",
+            details={"key": key},
+        )
+    return PromptTemplateResponse(key=key, content=payload.content)
+
+
+@router.post(
+    "/prompts/{key}/reset",
+    response_model=PromptTemplateResponse,
+    responses={404: {"model": ApiErrorResponse}},
+)
+async def reset_prompt(key: str):
+    try:
+        content = reset_prompt_template(key)
     except KeyError:
         return api_error_response(
             status_code=404,

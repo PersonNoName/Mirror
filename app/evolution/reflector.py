@@ -30,14 +30,19 @@ class MetaCognitionReflector:
         if task is None:
             return
         lesson = await self.reflect(task, outcome=outcome)
-        if lesson is None or lesson.confidence < 0.5:
-            return
-        await self.event_bus.emit(
-            Event(
-                type=EventType.LESSON_GENERATED,
-                payload={"lesson": self._lesson_payload(lesson)},
+        lessons: list[Lesson] = []
+        if lesson is not None and lesson.confidence >= 0.5:
+            lessons.append(lesson)
+        continuity_lesson = self._build_agent_continuity_lesson(task, outcome=outcome)
+        if continuity_lesson is not None:
+            lessons.append(continuity_lesson)
+        for item in lessons:
+            await self.event_bus.emit(
+                Event(
+                    type=EventType.LESSON_GENERATED,
+                    payload={"lesson": self._lesson_payload(item)},
+                )
             )
-        )
 
     async def reflect(self, task: Any, outcome: str) -> Lesson | None:
         try:
@@ -105,3 +110,49 @@ class MetaCognitionReflector:
             "details": lesson.details,
             "confidence": lesson.confidence,
         }
+
+    @staticmethod
+    def _build_agent_continuity_lesson(task: Any, *, outcome: str) -> Lesson | None:
+        user_id = str(task.metadata.get("user_id", ""))
+        if not user_id:
+            return None
+        domain = str(task.metadata.get("domain", task.assigned_to or "general"))
+        if outcome == "failed":
+            summary = f"Agent continuity should become more cautious after a failed {domain} task."
+            return Lesson(
+                source_task_id=task.id,
+                user_id=user_id,
+                domain="agent_continuity",
+                outcome=outcome,
+                category="agent_state_shift",
+                summary=summary,
+                lesson_text=summary,
+                details={
+                    "task_id": task.id,
+                    "domain": domain,
+                    "shift": "caution_up",
+                    "summary_hint": task.error_trace or summary,
+                    "active_signal": "task_failure",
+                },
+                confidence=0.82,
+            )
+        if outcome == "done":
+            summary = f"Agent continuity can recover confidence after a completed {domain} task."
+            return Lesson(
+                source_task_id=task.id,
+                user_id=user_id,
+                domain="agent_continuity",
+                outcome=outcome,
+                category="agent_state_recovery",
+                summary=summary,
+                lesson_text=summary,
+                details={
+                    "task_id": task.id,
+                    "domain": domain,
+                    "shift": "confidence_recover",
+                    "summary_hint": summary,
+                    "active_signal": "task_success",
+                },
+                confidence=0.74,
+            )
+        return None

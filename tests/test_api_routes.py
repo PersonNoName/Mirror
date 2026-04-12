@@ -36,7 +36,7 @@ class StaticSoulEngine:
     def __init__(self, action: Any) -> None:
         self.action = action
 
-    async def run(self, inbound: Any) -> Any:
+    async def run(self, inbound: Any, **kwargs: Any) -> Any:
         return self.action
 
 
@@ -76,6 +76,15 @@ class RecordingEventBus:
         self.events.append(event)
 
 
+class RecordingProactivityService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+
+    async def deliver_follow_up(self, *, user_id: str, ctx: Any, platform_adapter: Any, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append((user_id, ctx))
+        return {"eligible": False, "reason": "none"}
+
+
 class StaticEvolutionJournal:
     def __init__(self, items: list[Any]) -> None:
         self.items = items
@@ -93,6 +102,7 @@ class RecordingMemoryGovernanceService:
         self.block_calls: list[tuple[str, str, bool]] = []
         self.correct_calls: list[dict[str, Any]] = []
         self.delete_calls: list[tuple[str, str, str]] = []
+        self.delete_mid_term_calls: list[tuple[str, str, str]] = []
         self.memory_items: list[dict[str, Any]] = []
         self.policy = {
             "blocked_content_classes": [],
@@ -107,7 +117,14 @@ class RecordingMemoryGovernanceService:
             "updated_at": "2026-04-11T10:00:00+00:00",
         }
 
-    async def list_memory(self, *, user_id: str, include_candidates: bool = True, include_superseded: bool = False):
+    async def list_memory(
+        self,
+        *,
+        user_id: str,
+        include_candidates: bool = True,
+        include_superseded: bool = False,
+        include_mid_term: bool = False,
+    ):
         self.list_calls.append((user_id, include_candidates, include_superseded))
         return list(self.memory_items)
 
@@ -147,6 +164,12 @@ class RecordingMemoryGovernanceService:
             raise KeyError("missing")
         return None
 
+    async def delete_mid_term_memory(self, *, user_id: str, memory_key: str, reason: str):
+        self.delete_mid_term_calls.append((user_id, memory_key, reason))
+        if memory_key == "missing":
+            raise KeyError("missing")
+        return None
+
 
 class PreloadedWebPlatformAdapter(WebPlatformAdapter):
     def __init__(self, events: list[dict[str, Any]] | None = None) -> None:
@@ -160,6 +183,20 @@ class PreloadedWebPlatformAdapter(WebPlatformAdapter):
         return queue
 
 
+class RecordingVectorRetriever:
+    def __init__(self, items: list[dict[str, Any]] | None = None, error: str | None = None) -> None:
+        self.items = items or []
+        self.error = error
+        self.calls: list[tuple[str, str, int]] = []
+
+    async def list_namespace_items(self, *, user_id: str, namespace: str, limit: int = 20) -> list[dict[str, Any]]:
+        self.calls.append((user_id, namespace, limit))
+        return list(self.items)[:limit]
+
+    def last_namespace_list_error(self, *, user_id: str, namespace: str) -> str | None:
+        return self.error
+
+
 def build_test_app(
     *,
     web_platform: Any | None = None,
@@ -168,8 +205,10 @@ def build_test_app(
     blackboard: Any | None = None,
     task_system: Any | None = None,
     event_bus: Any | None = None,
+    proactivity_service: Any | None = None,
     evolution_journal: Any | None = None,
     memory_governance_service: Any | None = None,
+    vector_retriever: Any | None = None,
     streaming_disabled: bool = False,
 ) -> FastAPI:
     app = FastAPI()
@@ -188,9 +227,12 @@ def build_test_app(
     app.state.blackboard = blackboard or RecordingBlackboard(task=SimpleNamespace(id="task-1"))
     app.state.task_system = task_system or RecordingTaskSystem()
     app.state.event_bus = event_bus or RecordingEventBus()
+    app.state.proactivity_service = proactivity_service or RecordingProactivityService()
     app.state.event_bus_event_factory = lambda event_type, payload: {"type": event_type, "payload": payload}
     app.state.evolution_journal = evolution_journal or StaticEvolutionJournal(items=[])
     app.state.memory_governance_service = memory_governance_service or RecordingMemoryGovernanceService()
+    app.state.mid_term_memory_store = SimpleNamespace(degraded=False, degraded_reason=None, storage_source="postgres")
+    app.state.vector_retriever = vector_retriever
     app.state.chat_trace_service = ChatTraceService(emitter=app.state.web_platform.emit_trace)
     app.state.streaming_disabled = streaming_disabled
     return app
@@ -220,6 +262,7 @@ def test_chat_returns_structured_response_model() -> None:
     assert body["meta"]["task_id"] == "task-42"
     assert body["meta"]["trace_id"]
     assert body["trace"] is None
+    assert body["brain"] is None
     assert app.state.core_memory_cache.active_sessions == [("user-1", "session-1")]
     assert len(app.state.session_context_store.messages) == 2
 
@@ -239,6 +282,7 @@ def test_chat_can_return_trace_when_requested() -> None:
     assert body["trace"]["session_id"] == "session-1"
     assert body["trace"]["status"] == "completed"
     assert len(body["trace"]["steps"]) >= 3
+    assert body["brain"] is None
 
 
 def test_chat_rejects_empty_text_and_session_id() -> None:
@@ -304,6 +348,22 @@ def test_chat_stream_emits_expected_sse_event_sequence() -> None:
     assert '"content": "hello world"' in body
     assert "event: done" in body
     assert '"status": "done"' in body
+
+
+def test_chat_stream_registers_user_presence_and_checks_proactive_followup() -> None:
+    proactivity = RecordingProactivityService()
+    app = build_test_app(
+        proactivity_service=proactivity,
+        web_platform=PreloadedWebPlatformAdapter(events=[{"event": "done", "data": {"status": "done"}}]),
+    )
+    client = TestClient(app)
+
+    with client.stream("GET", "/chat/stream", params={"session_id": "session-1", "user_id": "user-1"}) as response:
+        _ = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert proactivity.calls
+    assert proactivity.calls[0][0] == "user-1"
 
 
 def test_chat_trace_returns_latest_trace_for_session() -> None:
@@ -478,6 +538,99 @@ def test_memory_routes_support_correct_delete_and_block() -> None:
     assert delete_response.json() == {"status": "ok", "memory_key": "fact:tone:direct"}
     assert block_response.status_code == 200
     assert "support_preference" in block_response.json()["policy"]["blocked_content_classes"]
+
+
+def test_memory_routes_support_mid_term_listing_and_delete() -> None:
+    service = RecordingMemoryGovernanceService()
+    service.memory_items = [
+        {
+            "memory_key": "mid_term:project:mirror-memory",
+            "content": "User is working on the mirror memory rollout.",
+            "truth_type": "mid_term",
+            "status": "active",
+            "source": "dialogue_mid_term",
+            "confidence": 0.7,
+            "confirmed_by_user": False,
+            "updated_at": "2026-04-11T10:00:00+00:00",
+            "visibility": "mid_term",
+        }
+    ]
+    app = build_test_app(memory_governance_service=service)
+    client = TestClient(app)
+
+    list_response = client.get("/memory/mid-term", params={"user_id": "user-1"})
+    delete_response = client.post(
+        "/memory/mid-term/delete",
+        json={"user_id": "user-1", "memory_key": "mid_term:project:mirror-memory", "reason": "clear"},
+    )
+
+    assert list_response.status_code == 200
+    assert list_response.json()["count"] == 1
+    assert list_response.json()["degraded"] is False
+    assert list_response.json()["source"] == "postgres"
+    assert list_response.json()["items"][0]["visibility"] == "mid_term"
+    assert delete_response.status_code == 200
+    assert service.delete_mid_term_calls == [("user-1", "mid_term:project:mirror-memory", "clear")]
+
+
+def test_memory_routes_expose_mid_term_degraded_state() -> None:
+    service = RecordingMemoryGovernanceService()
+    app = build_test_app(memory_governance_service=service)
+    app.state.mid_term_memory_store = SimpleNamespace(
+        degraded=True,
+        degraded_reason="mid_term_memory_schema_missing",
+        storage_source="memory_fallback",
+    )
+    client = TestClient(app)
+
+    response = client.get("/memory/mid-term", params={"user_id": "user-1"})
+
+    assert response.status_code == 200
+    assert response.json()["degraded"] is True
+    assert response.json()["source"] == "memory_fallback"
+
+
+def test_memory_routes_support_conversation_episode_listing() -> None:
+    retriever = RecordingVectorRetriever(
+        items=[
+            {
+                "id": "episode-1",
+                "content": "Previous conversation on 2026-04-12. User said: \"We discussed memory.\"",
+                "namespace": "conversation_episode",
+                "status": "active",
+                "truth_type": "fact",
+                "confirmed_by_user": False,
+                "created_at": "2026-04-12T00:00:00+00:00",
+                "metadata": {"session_id": "session-1", "event_id": "evt-1"},
+            }
+        ]
+    )
+    app = build_test_app(vector_retriever=retriever)
+    client = TestClient(app)
+
+    response = client.get("/memory/conversation-episodes", params={"user_id": "user-1", "limit": 10})
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 1
+    assert response.json()["degraded"] is False
+    assert response.json()["source"] == "qdrant"
+    assert response.json()["error"] is None
+    assert response.json()["items"][0]["namespace"] == "conversation_episode"
+    assert retriever.calls == [("user-1", "conversation_episode", 10)]
+
+
+def test_memory_routes_expose_conversation_episode_degraded_state() -> None:
+    retriever = RecordingVectorRetriever(items=[], error="qdrant_request_failed")
+    app = build_test_app(vector_retriever=retriever)
+    client = TestClient(app)
+
+    response = client.get("/memory/conversation-episodes", params={"user_id": "user-1", "limit": 10})
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 0
+    assert response.json()["degraded"] is True
+    assert response.json()["source"] == "qdrant"
+    assert response.json()["error"] == "qdrant_request_failed"
 
 
 def test_memory_routes_return_404_for_missing_memory_key() -> None:

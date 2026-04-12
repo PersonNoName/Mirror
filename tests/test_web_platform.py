@@ -27,17 +27,44 @@ async def test_normalize_inbound_populates_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_outbound_emits_delta_message_done_for_streaming() -> None:
+async def test_normalize_inbound_repairs_utf8_latin1_mojibake() -> None:
+    adapter = WebPlatformAdapter()
+
+    inbound = await adapter.normalize_inbound(
+        {
+            "text": "æä»¬ä¹åé½èäºäºä»ä¹å",
+            "session_id": "session-1",
+            "user_id": "user-1",
+        }
+    )
+
+    assert inbound.text == "我们之前都聊了些什么啊"
+
+
+@pytest.mark.asyncio
+async def test_send_outbound_emits_message_done_for_streaming_text() -> None:
     adapter = WebPlatformAdapter()
     queue = adapter.subscribe("session-1")
     ctx = PlatformContext(platform="web", user_id="user-1", session_id="session-1", capabilities={"streaming"})
 
     await adapter.send_outbound(ctx, OutboundMessage(type="text", content="hello world"))
 
-    events = [await queue.get(), await queue.get(), await queue.get()]
-    assert events[0]["event"] == "delta"
-    assert events[1]["event"] == "message"
-    assert events[2] == {"event": "done", "data": {"status": "done"}}
+    events = [await queue.get(), await queue.get()]
+    assert [event["event"] for event in events] == ["message", "done"]
+    assert events[0]["data"]["content"] == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_send_outbound_emits_delta_only_for_stream_events() -> None:
+    adapter = WebPlatformAdapter()
+    queue = adapter.subscribe("session-stream")
+    ctx = PlatformContext(platform="web", user_id="user-1", session_id="session-stream", capabilities={"streaming"})
+
+    await adapter.send_outbound(ctx, OutboundMessage(type="stream", content="hello"))
+
+    event = await queue.get()
+    assert event == {"event": "delta", "data": {"delta": "hello"}}
+    assert queue.empty()
 
 
 @pytest.mark.asyncio

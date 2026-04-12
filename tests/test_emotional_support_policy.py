@@ -10,6 +10,7 @@ from app.soul import SoulEngine
 from tests.conftest import (
     DummyChatModel,
     DummyCoreMemoryCache,
+    DummyMidTermMemoryStore,
     DummyModelRegistry,
     DummySessionContextStore,
     DummyToolCatalog,
@@ -38,6 +39,7 @@ def build_engine(core_memory: CoreMemory | None = None) -> SoulEngine:
         model_registry=DummyModelRegistry(),
         core_memory_cache=DummyCoreMemoryCache(core_memory=core_memory or CoreMemory()),
         session_context_store=DummySessionContextStore(),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
         vector_retriever=DummyVectorRetriever(),
         tool_registry=DummyToolCatalog(),
     )

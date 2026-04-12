@@ -10,7 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-OptionalNonEmptyStr = Annotated[str | None, StringConstraints(strip_whitespace=True, min_length=1)]
+OptionalNonEmptyStr = Annotated[
+    str | None, StringConstraints(strip_whitespace=True, min_length=1)
+]
 
 
 class APIModel(BaseModel):
@@ -52,6 +54,22 @@ class ChatTraceResponse(BaseModel):
     output: dict[str, Any] | None = None
 
 
+class ChatBrainResponse(BaseModel):
+    self_cognition: str
+    world_model: str
+    stable_identity: str
+    relationship_style: str
+    relationship_stage: str
+    proactivity_policy: str
+    emotional_context: str
+    user_emotional_state: str
+    agent_continuity_state: str
+    support_policy: str
+    session_adaptations: str
+    task_experience: str
+    tool_list: str
+
+
 class ChatResponse(BaseModel):
     reply: str
     session_id: str
@@ -59,6 +77,7 @@ class ChatResponse(BaseModel):
     status: str
     meta: ChatMetaResponse | None = None
     trace: ChatTraceResponse | None = None
+    brain: ChatBrainResponse | None = None
 
 
 class HitlResponse(BaseModel):
@@ -122,6 +141,32 @@ class MemoryDeleteResponse(BaseModel):
     memory_key: str
 
 
+class MidTermMemoryListResponse(BaseModel):
+    items: list[MemoryItemResponse]
+    count: int
+    degraded: bool = False
+    source: str = "postgres"
+
+
+class ConversationEpisodeItemResponse(BaseModel):
+    id: str
+    content: str
+    namespace: str
+    status: str
+    truth_type: str
+    confirmed_by_user: bool
+    created_at: datetime | str
+    metadata: dict[str, Any]
+
+
+class ConversationEpisodeListResponse(BaseModel):
+    items: list[ConversationEpisodeItemResponse]
+    count: int
+    degraded: bool = False
+    source: str = "qdrant"
+    error: str | None = None
+
+
 class PromptTemplateResponse(BaseModel):
     key: str
     content: str
@@ -130,6 +175,10 @@ class PromptTemplateResponse(BaseModel):
 class PromptTemplateListResponse(BaseModel):
     items: list[PromptTemplateResponse]
     count: int
+
+
+class PromptUpdateRequest(APIModel):
+    content: NonEmptyStr
 
 
 class MemoryCorrectionRequest(APIModel):
@@ -161,5 +210,9 @@ def api_error_response(
     message: str,
     details: dict[str, Any] | None = None,
 ) -> JSONResponse:
-    payload = ApiErrorResponse(error=ApiErrorBody(code=code, message=message, details=details))
-    return JSONResponse(status_code=status_code, content=payload.model_dump(mode="json"))
+    payload = ApiErrorResponse(
+        error=ApiErrorBody(code=code, message=message, details=details)
+    )
+    return JSONResponse(
+        status_code=status_code, content=payload.model_dump(mode="json")
+    )

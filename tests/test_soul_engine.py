@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.memory import (
+    AgentContinuityState,
     BehavioralRule,
     CapabilityEntry,
     CoreMemory,
@@ -11,6 +12,7 @@ from app.memory import (
     MemoryEntry,
     RelationshipStageState,
     RelationshipMemory,
+    UserEmotionalState,
 )
 from app.platform.base import InboundMessage, PlatformContext
 from app.providers.openai_compat import ProviderRequestError
@@ -19,6 +21,7 @@ from app.soul import SoulEngine
 from tests.conftest import (
     DummyChatModel,
     DummyCoreMemoryCache,
+    DummyMidTermMemoryStore,
     DummyModelRegistry,
     DummySessionContextStore,
     DummyToolCatalog,
@@ -50,6 +53,7 @@ async def test_soul_engine_run_parses_valid_action() -> None:
         model_registry=DummyModelRegistry(chat_model=DummyChatModel(response=response)),
         core_memory_cache=DummyCoreMemoryCache(),
         session_context_store=DummySessionContextStore(),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
         vector_retriever=DummyVectorRetriever(),
         tool_registry=DummyToolCatalog(),
     )
@@ -59,6 +63,43 @@ async def test_soul_engine_run_parses_valid_action() -> None:
     assert action.type == "direct_reply"
     assert action.content == "hello back"
     assert action.inner_thoughts == "think"
+    assert action.metadata["brain"]["self_cognition"]
+    assert action.metadata["brain"]["user_emotional_state"]
+    assert action.metadata["brain"]["agent_continuity_state"]
+    assert action.metadata["brain"]["tool_list"]
+
+
+@pytest.mark.asyncio
+async def test_soul_engine_streams_direct_reply_content_incrementally() -> None:
+    stream_chunks = [
+        {"choices": [{"delta": {"content": "<inner_thoughts>think</inner_thoughts><action>direct_reply</action><content>Hello"}}]},
+        {"choices": [{"delta": {"content": " streamed"}}]},
+        {"choices": [{"delta": {"content": " world</content>"}}]},
+    ]
+    chat_model = DummyChatModel(
+        response=None,
+        stream_chunks=stream_chunks,
+    )
+    engine = SoulEngine(
+        model_registry=DummyModelRegistry(chat_model=chat_model),
+        core_memory_cache=DummyCoreMemoryCache(),
+        session_context_store=DummySessionContextStore(),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
+        vector_retriever=DummyVectorRetriever(),
+        tool_registry=DummyToolCatalog(),
+    )
+    deltas: list[str] = []
+
+    async def collect(delta: str) -> None:
+        deltas.append(delta)
+
+    action = await engine.run(build_message(), on_direct_reply_delta=collect)
+
+    assert action.type == "direct_reply"
+    assert action.content == "Hello streamed world"
+    assert action.streamed is True
+    assert "".join(deltas) == "Hello streamed world"
+    assert chat_model.stream_calls
 
 
 @pytest.mark.asyncio
@@ -82,6 +123,7 @@ async def test_soul_engine_high_risk_emotional_message_short_circuits_to_safe_re
         model_registry=DummyModelRegistry(chat_model=chat_model),
         core_memory_cache=DummyCoreMemoryCache(),
         session_context_store=DummySessionContextStore(),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
         vector_retriever=DummyVectorRetriever(),
         tool_registry=DummyToolCatalog(),
     )
@@ -91,6 +133,7 @@ async def test_soul_engine_high_risk_emotional_message_short_circuits_to_safe_re
     assert action.type == "direct_reply"
     assert "immediate risk" in action.content
     assert action.metadata["emotional_risk"] == "high"
+    assert action.metadata["brain"]["emotional_context"]
     assert chat_model.calls == []
 
 
@@ -108,6 +151,7 @@ async def test_soul_engine_falls_back_when_api_key_missing() -> None:
         model_registry=DummyModelRegistry(api_key=None),
         core_memory_cache=DummyCoreMemoryCache(),
         session_context_store=DummySessionContextStore(),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
         vector_retriever=DummyVectorRetriever(),
         tool_registry=DummyToolCatalog(),
     )
@@ -125,6 +169,7 @@ async def test_soul_engine_falls_back_when_provider_raises() -> None:
         model_registry=DummyModelRegistry(chat_model=DummyChatModel(error=ProviderRequestError("boom"))),
         core_memory_cache=DummyCoreMemoryCache(),
         session_context_store=DummySessionContextStore(),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
         vector_retriever=DummyVectorRetriever(),
         tool_registry=DummyToolCatalog(),
     )
@@ -136,12 +181,49 @@ async def test_soul_engine_falls_back_when_provider_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_soul_engine_falls_back_to_generate_when_stream_not_supported() -> None:
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": (
+                        "<inner_thoughts>think</inner_thoughts>"
+                        "<action>direct_reply</action>"
+                        "<content>hello from generate</content>"
+                    )
+                }
+            }
+        ]
+    }
+    chat_model = DummyChatModel(response=response, stream_chunks=None)
+    engine = SoulEngine(
+        model_registry=DummyModelRegistry(chat_model=chat_model),
+        core_memory_cache=DummyCoreMemoryCache(),
+        session_context_store=DummySessionContextStore(),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
+        vector_retriever=DummyVectorRetriever(),
+        tool_registry=DummyToolCatalog(),
+    )
+
+    action = await engine.run(build_message(), on_direct_reply_delta=lambda _delta: _noop())
+
+    assert action.content == "hello from generate"
+    assert chat_model.calls
+    assert chat_model.stream_calls
+
+
+async def _noop() -> None:
+    return None
+
+
+@pytest.mark.asyncio
 async def test_soul_engine_falls_back_when_response_is_unparsable() -> None:
     response = {"choices": [{"message": {"content": "plain text with no action tags"}}]}
     engine = SoulEngine(
         model_registry=DummyModelRegistry(chat_model=DummyChatModel(response=response)),
         core_memory_cache=DummyCoreMemoryCache(),
         session_context_store=DummySessionContextStore(),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
         vector_retriever=DummyVectorRetriever(),
         tool_registry=DummyToolCatalog(),
     )
@@ -244,6 +326,29 @@ def test_soul_engine_build_prompt_formats_memory_blocks_for_model_usefulness() -
     core_memory.task_experience.lesson_digest.append(MemoryEntry(content="Prefer bounded retries"))
     core_memory.task_experience.domain_tips["python"] = [MemoryEntry(content="Prefer pytest for test coverage")]
     core_memory.task_experience.agent_habits["web_agent"] = [MemoryEntry(content="Summarize sources truthfully")]
+    core_memory.user_emotional_state = UserEmotionalState(
+        emotion_class="anxiety",
+        intensity="medium",
+        emotional_risk="low",
+        support_mode="listening",
+        support_preference="listening",
+        stability="fragile",
+        unresolved_topics=["work"],
+        carryover_summary="User has been stressed about work recently.",
+        last_observed_at="2026-04-12T00:00:00+00:00",
+        carryover_until="2026-04-18T00:00:00+00:00",
+    )
+    core_memory.agent_continuity_state = AgentContinuityState(
+        caution_level="medium",
+        warmth_level="medium",
+        repair_mode=False,
+        recovery_mode=True,
+        relational_confidence=0.62,
+        continuity_summary="Recent successful turns allow slightly more continuity.",
+        active_signals=["task_success"],
+        last_event_at="2026-04-12T00:00:00+00:00",
+        last_shift_reason="Recovered after a successful task.",
+    )
 
     engine = SoulEngine(
         model_registry=DummyModelRegistry(),
@@ -252,6 +357,7 @@ def test_soul_engine_build_prompt_formats_memory_blocks_for_model_usefulness() -
             recent_messages=[{"role": "user", "content": "hello before"}],
             adaptations=["Keep answers short"],
         ),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
         vector_retriever=DummyVectorRetriever(
             matches=[
                 {
@@ -269,6 +375,7 @@ def test_soul_engine_build_prompt_formats_memory_blocks_for_model_usefulness() -
         core_memory=core_memory,
         recent_messages=[{"role": "user", "content": "hello before"}],
         session_adaptations_live=["Keep answers short"],
+        mid_term_memories=[],
         retrieved={
             "matches": [
                 {
@@ -309,6 +416,11 @@ def test_soul_engine_build_prompt_formats_memory_blocks_for_model_usefulness() -
     assert "- stored_preference=allow" in prompt
     assert "Emotional Context" in prompt
     assert "- emotion_class=overwhelm" in prompt
+    assert "User Emotional State" in prompt
+    assert "- active=true" in prompt
+    assert "User has been stressed about work recently." in prompt
+    assert "Agent Continuity State" in prompt
+    assert "- recovery_mode=true" in prompt
     assert "Support Policy" in prompt
     assert "- support_mode=listening" in prompt
     assert "Session Adaptation" in prompt
@@ -340,6 +452,7 @@ def test_soul_engine_build_prompt_uses_stable_empty_memory_fallbacks() -> None:
         model_registry=DummyModelRegistry(),
         core_memory_cache=DummyCoreMemoryCache(core_memory=core_memory),
         session_context_store=DummySessionContextStore(),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
         vector_retriever=DummyVectorRetriever(matches=[]),
         tool_registry=DummyToolCatalog(),
     )
@@ -348,6 +461,7 @@ def test_soul_engine_build_prompt_uses_stable_empty_memory_fallbacks() -> None:
         core_memory=core_memory,
         recent_messages=[],
         session_adaptations_live=[],
+        mid_term_memories=[],
         retrieved={"matches": []},
         emotional_context=engine._interpret_emotion("hello", core_memory),
         support_policy=engine._build_support_policy(
@@ -362,6 +476,8 @@ def test_soul_engine_build_prompt_uses_stable_empty_memory_fallbacks() -> None:
     assert "TaskExperience(" not in prompt
     assert "- No explicit capabilities recorded." in prompt
     assert "- No confirmed facts recorded." in prompt
+    assert "No active cross-session emotional carryover." in prompt
+    assert "No active cross-session agent continuity shift." in prompt
     assert "No active session adaptations for this session." in prompt
     assert "- No lesson digests recorded." in prompt
     assert "- No retrieved context." in prompt
@@ -385,3 +501,47 @@ def test_support_policy_prefers_current_explicit_request_over_stored_preference(
     assert policy.stored_preference == "listening"
     assert policy.inferred_preference == "problem_solving"
     assert policy.support_mode == "problem_solving"
+
+
+def test_emotional_carryover_survives_new_session_until_it_expires() -> None:
+    core_memory = CoreMemory()
+    core_memory.user_emotional_state = UserEmotionalState(
+        emotion_class="sadness",
+        intensity="medium",
+        emotional_risk="low",
+        support_mode="listening",
+        support_preference="listening",
+        stability="fragile",
+        unresolved_topics=["relationship"],
+        carryover_summary="User was working through a difficult relationship issue.",
+        last_observed_at="2026-04-12T00:00:00+00:00",
+        carryover_until="2026-04-18T00:00:00+00:00",
+    )
+
+    emotional_context = SoulEngine._interpret_emotion("hello again", core_memory)
+    policy = SoulEngine._build_support_policy("hello again", core_memory, emotional_context)
+
+    assert emotional_context.emotion_class == "sadness"
+    assert emotional_context.duration_hint == "carryover"
+    assert policy.support_mode == "listening"
+
+
+def test_emotional_carryover_expires_after_decay_window() -> None:
+    core_memory = CoreMemory()
+    core_memory.user_emotional_state = UserEmotionalState(
+        emotion_class="sadness",
+        intensity="medium",
+        emotional_risk="low",
+        support_mode="listening",
+        support_preference="listening",
+        stability="fragile",
+        unresolved_topics=["relationship"],
+        carryover_summary="Old emotional carryover.",
+        last_observed_at="2026-03-20T00:00:00+00:00",
+        carryover_until="2026-03-27T00:00:00+00:00",
+    )
+
+    emotional_context = SoulEngine._interpret_emotion("hello again", core_memory)
+
+    assert emotional_context.emotion_class == "neutral"
+    assert emotional_context.duration_hint == "unknown"

@@ -21,6 +21,7 @@ from app.evolution import (
     EvolutionJournal,
     EvolutionScheduler,
     GentleProactivityService,
+    MidTermMemoryExtractor,
     MetaCognitionReflector,
     ObserverEngine,
     PersonalityEvolver,
@@ -35,6 +36,7 @@ from app.memory import (
     CoreMemoryStore,
     GraphStore,
     MemoryGovernanceService,
+    MidTermMemoryStore,
     SessionContextStore,
     VectorRetriever,
 )
@@ -81,6 +83,7 @@ class RuntimeContext:
     core_memory_store: CoreMemoryStore
     core_memory_cache: CoreMemoryCache
     session_context_store: Any
+    mid_term_memory_store: MidTermMemoryStore
     vector_retriever: VectorRetriever | None
     graph_store: GraphStore | None
     event_bus: RedisStreamsEventBus
@@ -114,6 +117,18 @@ class RuntimeContext:
     startup_degraded_reasons: list[str] = field(default_factory=list)
 
     def health_snapshot(self) -> dict[str, Any]:
+        return self._build_health_snapshot(qdrant_status=None)
+
+    async def health_snapshot_async(self) -> dict[str, Any]:
+        qdrant_status: dict[str, Any] | None = None
+        if self.vector_retriever is None:
+            qdrant_status = {"status": "degraded", "reason": "qdrant_unavailable"}
+        else:
+            ok, reason = await self.vector_retriever.ping()
+            qdrant_status = {"status": "ok" if ok else "degraded", "reason": reason}
+        return self._build_health_snapshot(qdrant_status=qdrant_status)
+
+    def _build_health_snapshot(self, *, qdrant_status: dict[str, Any] | None) -> dict[str, Any]:
         skill_loaded = len(self.skill_summary.get("loaded", []))
         skill_skipped = len(self.skill_summary.get("skipped", []))
         skill_failed = len(self.skill_summary.get("failed", []))
@@ -136,8 +151,16 @@ class RuntimeContext:
                 "reason": "neo4j_unavailable" if self.graph_store is None else None,
             },
             "qdrant": {
-                "status": "degraded" if self.vector_retriever is None else "ok",
-                "reason": "qdrant_unavailable" if self.vector_retriever is None else None,
+                "status": (
+                    qdrant_status["status"]
+                    if qdrant_status is not None
+                    else ("degraded" if self.vector_retriever is None else "ok")
+                ),
+                "reason": (
+                    qdrant_status["reason"]
+                    if qdrant_status is not None
+                    else ("qdrant_unavailable" if self.vector_retriever is None else None)
+                ),
             },
             "event_bus": {"status": "degraded" if self.event_bus.degraded else "ok"},
             "outbox_relay": {
@@ -147,6 +170,10 @@ class RuntimeContext:
             "session_context": {
                 "status": "degraded" if isinstance(self.session_context_store, _NullSessionContextStore) else "ok",
                 "reason": "redis_unavailable" if isinstance(self.session_context_store, _NullSessionContextStore) else None,
+            },
+            "mid_term_memory": {
+                "status": "degraded" if self.mid_term_memory_store.degraded else "ok",
+                "reason": getattr(self.mid_term_memory_store, "degraded_reason", None),
             },
             "worker_manager": {
                 "status": "degraded" if degraded_worker_count else "ok",
@@ -247,6 +274,12 @@ async def bootstrap_runtime() -> RuntimeContext:
     core_memory_store = CoreMemoryStore()
     core_memory_cache = CoreMemoryCache(store=core_memory_store, redis_client=redis_client)
     session_context_store = SessionContextStore(redis_client) if redis_client is not None else _NullSessionContextStore()
+    mid_term_memory_store = MidTermMemoryStore()
+    await mid_term_memory_store.initialize()
+    if mid_term_memory_store.degraded and getattr(mid_term_memory_store, "degraded_reason", None):
+        reason = str(mid_term_memory_store.degraded_reason)
+        if reason not in startup_degraded_reasons:
+            startup_degraded_reasons.append(reason)
 
     graph_store = None
     try:
@@ -287,12 +320,13 @@ async def bootstrap_runtime() -> RuntimeContext:
     task_monitor = TaskMonitor(task_store=task_store, blackboard=blackboard)
 
     web_platform = WebPlatformAdapter()
-    chat_trace_service = ChatTraceService(emitter=web_platform.emit_trace)
+    chat_trace_service = ChatTraceService(emitter=getattr(web_platform, "emit_trace", None))
     circuit_breaker = AsyncCircuitBreaker()
     memory_governance_service = MemoryGovernanceService(
         core_memory_cache=core_memory_cache,
         core_memory_scheduler=None,
         graph_store=graph_store,
+        mid_term_memory_store=mid_term_memory_store,
         candidate_manager=evolution_candidate_manager,
         evolution_journal=evolution_journal,
     )
@@ -361,10 +395,20 @@ async def bootstrap_runtime() -> RuntimeContext:
         candidate_manager=evolution_candidate_manager,
         relationship_state_machine=relationship_state_machine,
         memory_governance_service=memory_governance_service,
+        mid_term_memory_store=mid_term_memory_store,
+    )
+    mid_term_memory_extractor = MidTermMemoryExtractor(
+        mid_term_memory_store=mid_term_memory_store,
+        event_bus=event_bus,
+        memory_governance_service=memory_governance_service,
+        vector_retriever=vector_retriever,
     )
     scheduler = EvolutionScheduler(
         core_memory_scheduler=core_memory_scheduler,
         graph_store=graph_store,
+        mid_term_memory_store=mid_term_memory_store,
+        proactivity_service=proactivity_service,
+        platform_adapter=web_platform,
     )
 
     builtins = register_builtin_tools(tool_registry)
@@ -373,6 +417,7 @@ async def bootstrap_runtime() -> RuntimeContext:
         model_registry=model_registry,
         core_memory_cache=core_memory_cache,
         session_context_store=session_context_store,
+        mid_term_memory_store=mid_term_memory_store,
         vector_retriever=vector_retriever,
         tool_registry=tool_registry,
         hook_registry=hook_registry,
@@ -392,6 +437,7 @@ async def bootstrap_runtime() -> RuntimeContext:
     await event_bus.subscribe("dialogue_ended", observer.handle_dialogue_ended)
     await event_bus.subscribe("dialogue_ended", signal_extractor.handle_dialogue_ended)
     await event_bus.subscribe("dialogue_ended", proactivity_service.handle_dialogue_ended)
+    await event_bus.subscribe("dialogue_ended", mid_term_memory_extractor.handle_dialogue_ended)
     await event_bus.subscribe("task_completed", reflector.handle_task_completed)
     await event_bus.subscribe("task_failed", reflector.handle_task_failed)
     await event_bus.subscribe("lesson_generated", cognition_updater.handle_lesson_generated)
@@ -445,6 +491,7 @@ async def bootstrap_runtime() -> RuntimeContext:
         core_memory_store=core_memory_store,
         core_memory_cache=core_memory_cache,
         session_context_store=session_context_store,
+        mid_term_memory_store=mid_term_memory_store,
         vector_retriever=vector_retriever,
         graph_store=graph_store,
         event_bus=event_bus,

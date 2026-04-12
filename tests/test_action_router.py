@@ -41,12 +41,36 @@ async def test_action_router_routes_direct_reply() -> None:
         hook_registry=hooks,
     )
 
-    result = await router.route(Action(type="direct_reply", content="hello back"), build_message())
+    result = await router.route(
+        Action(type="direct_reply", content="hello back", metadata={"brain": {"self_cognition": "x"}}),
+        build_message(),
+    )
 
     assert result["reply"] == "hello back"
     assert platform.outbound[0][1].content == "hello back"
+    assert result["brain"] == {"self_cognition": "x"}
+    assert platform.outbound[0][1].metadata["brain"] == {"self_cognition": "x"}
     assert event_bus.events[0].type == "dialogue_ended"
     assert hooks.calls
+
+
+@pytest.mark.asyncio
+async def test_action_router_finalizes_streamed_direct_reply() -> None:
+    platform = RecordingPlatformAdapter()
+    router = ActionRouter(
+        platform_adapter=platform,
+        event_bus=RecordingEventBus(),
+        blackboard=DummyBlackboard(),
+        task_system=DummyTaskSystem(),
+        tool_registry=ToolRegistry(),
+    )
+
+    result = await router.route(Action(type="direct_reply", content="hello back", streamed=True), build_message())
+
+    assert result["reply"] == "hello back"
+    assert result["streamed"] is True
+    assert platform.outbound[0][1].type == "text"
+    assert platform.outbound[0][1].metadata == {"streamed": True}
 
 
 @pytest.mark.asyncio

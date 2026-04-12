@@ -47,10 +47,17 @@ class ActionRouter:
             {"action_type": action.type},
         )
         if action.type == "direct_reply":
-            await self.platform_adapter.send_outbound(
-                ctx,
-                OutboundMessage(type="text", content=str(action.content)),
-            )
+            outbound_metadata = self._reply_metadata(action)
+            if not action.streamed:
+                await self.platform_adapter.send_outbound(
+                    ctx,
+                    OutboundMessage(type="text", content=str(action.content), metadata=outbound_metadata),
+                )
+            else:
+                await self.platform_adapter.send_outbound(
+                    ctx,
+                    OutboundMessage(type="text", content=str(action.content), metadata=outbound_metadata),
+                )
             await self.event_bus.emit(
                 Event(
                     type=EventType.DIALOGUE_ENDED,
@@ -79,6 +86,8 @@ class ActionRouter:
                 "reply": str(action.content),
                 "action": action.type,
                 "session_id": inbound_message.session_id,
+                "streamed": action.streamed,
+                "brain": action.metadata.get("brain"),
             }
 
         if action.type == "publish_task":
@@ -134,7 +143,7 @@ class ActionRouter:
                 )
                 await self.platform_adapter.send_outbound(
                     ctx,
-                    OutboundMessage(type="text", content=message),
+                    OutboundMessage(type="text", content=message, metadata=self._reply_metadata(action)),
                 )
                 if self.hook_registry is not None:
                     await self.hook_registry.trigger(
@@ -155,11 +164,15 @@ class ActionRouter:
                     "action": action.type,
                     "task_id": task.id,
                     "session_id": inbound_message.session_id,
+                    "brain": action.metadata.get("brain"),
                 }
 
             await self.blackboard.assign(task)
             message = "Task dispatched. Waiting for asynchronous execution."
-            await self.platform_adapter.send_outbound(ctx, OutboundMessage(type="text", content=message))
+            await self.platform_adapter.send_outbound(
+                ctx,
+                OutboundMessage(type="text", content=message, metadata=self._reply_metadata(action)),
+            )
             if self.hook_registry is not None:
                 await self.hook_registry.trigger(
                     HookPoint.POST_REPLY,
@@ -179,6 +192,7 @@ class ActionRouter:
                 "action": action.type,
                 "task_id": task.id,
                 "session_id": inbound_message.session_id,
+                "brain": action.metadata.get("brain"),
             }
 
         if action.type == "hitl_relay":
@@ -207,11 +221,15 @@ class ActionRouter:
                 "action": action.type,
                 "task_id": request.task_id,
                 "session_id": inbound_message.session_id,
+                "brain": action.metadata.get("brain"),
             }
 
         if action.type == "tool_call":
             reply = await self._handle_tool_call(action, inbound_message)
-            await self.platform_adapter.send_outbound(ctx, OutboundMessage(type="text", content=reply))
+            await self.platform_adapter.send_outbound(
+                ctx,
+                OutboundMessage(type="text", content=reply, metadata=self._reply_metadata(action)),
+            )
             if self.hook_registry is not None:
                 await self.hook_registry.trigger(
                     HookPoint.POST_REPLY,
@@ -229,6 +247,7 @@ class ActionRouter:
                 "reply": reply,
                 "action": action.type,
                 "session_id": inbound_message.session_id,
+                "brain": action.metadata.get("brain"),
             }
 
         return None
@@ -304,3 +323,10 @@ class ActionRouter:
         if not isinstance(arguments, dict):
             raise ValueError("tool_call arguments must be an object.")
         return {"name": name, "arguments": arguments}
+
+    @staticmethod
+    def _reply_metadata(action: Action) -> dict[str, Any]:
+        metadata = dict(action.metadata)
+        if action.streamed:
+            metadata["streamed"] = True
+        return metadata

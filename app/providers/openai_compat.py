@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from urllib.parse import urlparse
 from typing import Any
 
 import httpx
@@ -35,16 +36,37 @@ class _HTTPProviderMixin:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
+            parsed = urlparse(self.spec.base_url)
+            host = parsed.hostname or ""
             self._client = httpx.AsyncClient(
                 base_url=self.spec.base_url.rstrip("/"),
                 headers=self._headers(),
                 timeout=self._timeout(),
+                trust_env=host not in {"127.0.0.1", "localhost", "::1"},
             )
         return self._client
 
     @staticmethod
     def _is_retryable_status(status_code: int) -> bool:
         return status_code == 429 or 500 <= status_code < 600
+
+    @staticmethod
+    def _format_error_detail(error: Exception | None) -> str:
+        if error is None:
+            return ""
+        response = getattr(error, "response", None)
+        if response is not None:
+            status_code = getattr(response, "status_code", None)
+            try:
+                body = response.text
+            except Exception:
+                body = ""
+            body_preview = body[:200].replace("\n", " ").strip()
+            if status_code is not None and body_preview:
+                return f" (status={status_code}, body={body_preview})"
+            if status_code is not None:
+                return f" (status={status_code})"
+        return f" ({error.__class__.__name__})"
 
     async def _request_json(
         self,
@@ -81,8 +103,9 @@ class _HTTPProviderMixin:
                     break
                 await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
 
+        detail = self._format_error_detail(last_error)
         raise ProviderRequestError(
-            f"provider request failed for {self.spec.profile}"
+            f"provider request failed for {self.spec.profile}{detail}"
         ) from last_error
 
 
@@ -132,8 +155,9 @@ class OpenAICompatibleChatModel(_HTTPProviderMixin, ChatModel):
                     break
                 await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
 
+        detail = self._format_error_detail(last_error)
         raise ProviderRequestError(
-            f"provider stream failed for {self.spec.profile}"
+            f"provider stream failed for {self.spec.profile}{detail}"
         ) from last_error
 
 

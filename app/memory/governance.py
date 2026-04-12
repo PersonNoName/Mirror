@@ -33,12 +33,14 @@ class MemoryGovernanceService:
         core_memory_cache: Any,
         core_memory_scheduler: Any,
         graph_store: Any | None,
+        mid_term_memory_store: Any | None,
         candidate_manager: Any | None,
         evolution_journal: Any | None,
     ) -> None:
         self.core_memory_cache = core_memory_cache
         self.core_memory_scheduler = core_memory_scheduler
         self.graph_store = graph_store
+        self.mid_term_memory_store = mid_term_memory_store
         self.candidate_manager = candidate_manager
         self.evolution_journal = evolution_journal
         self.degraded = False
@@ -49,6 +51,7 @@ class MemoryGovernanceService:
         user_id: str,
         include_candidates: bool = True,
         include_superseded: bool = False,
+        include_mid_term: bool = False,
     ) -> list[dict[str, Any]]:
         current = deepcopy(await self.core_memory_cache.get(user_id))
         world_model = self.prune_world_model(current.world_model)
@@ -90,6 +93,12 @@ class MemoryGovernanceService:
                         "visibility": "candidate",
                     }
                 )
+        if include_mid_term and self.mid_term_memory_store is not None:
+            for item in await self.mid_term_memory_store.list_items(
+                user_id=user_id,
+                include_expired=include_superseded,
+            ):
+                items.append(self.mid_term_memory_store.serialize_item(item))
         return sorted(items, key=lambda item: str(item.get("updated_at", "")), reverse=True)
 
     async def get_policy(self, user_id: str) -> MemoryGovernancePolicy:
@@ -117,6 +126,12 @@ class MemoryGovernanceService:
             if blocked
             else []
         )
+        if blocked and self.mid_term_memory_store is not None:
+            await self.mid_term_memory_store.suppress_related(
+                user_id=user_id,
+                content=content_class,
+                reason="governance_blocked",
+            )
         await self.core_memory_scheduler.write(user_id, "world_model", world_model)
         await self._record(
             user_id=user_id,
@@ -191,6 +206,13 @@ class MemoryGovernanceService:
             memory_key,
             rollback_reason="governance_corrected",
         )
+        if self.mid_term_memory_store is not None:
+            await self.mid_term_memory_store.suppress_related(
+                user_id=user_id,
+                memory_key=memory_key,
+                content=corrected_content,
+                reason="governance_corrected",
+            )
         await self.core_memory_scheduler.write(user_id, "world_model", world_model)
         await self._record(
             user_id=user_id,
@@ -235,6 +257,13 @@ class MemoryGovernanceService:
             memory_key,
             rollback_reason="governance_deleted",
         )
+        if self.mid_term_memory_store is not None:
+            await self.mid_term_memory_store.suppress_related(
+                user_id=user_id,
+                memory_key=memory_key,
+                content=target.content,
+                reason=reason,
+            )
         await self.core_memory_scheduler.write(user_id, "world_model", world_model)
         await self._record(
             user_id=user_id,
@@ -508,3 +537,14 @@ class MemoryGovernanceService:
                 details=details,
             )
         )
+
+    async def delete_mid_term_memory(self, *, user_id: str, memory_key: str, reason: str) -> None:
+        if self.mid_term_memory_store is None:
+            raise KeyError(memory_key)
+        suppressed = await self.mid_term_memory_store.suppress_related(
+            user_id=user_id,
+            memory_key=memory_key,
+            reason=reason,
+        )
+        if memory_key not in suppressed:
+            raise KeyError(memory_key)

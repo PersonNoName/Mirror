@@ -40,6 +40,16 @@ class StubCoreMemoryStore:
     pass
 
 
+class StubMidTermMemoryStore:
+    def __init__(self) -> None:
+        self.degraded = False
+        self.degraded_reason = None
+        self.storage_source = "postgres"
+
+    async def initialize(self) -> None:
+        return None
+
+
 class StubBlackboard:
     def __init__(self, **kwargs: object) -> None:
         self.kwargs = kwargs
@@ -244,6 +254,7 @@ async def test_bootstrap_runtime_survives_degraded_dependencies(monkeypatch: pyt
     monkeypatch.setattr(bootstrap_module, "ModelProviderRegistry", StubModelRegistry)
     monkeypatch.setattr(bootstrap_module, "build_routing_from_settings", lambda settings: {})
     monkeypatch.setattr(bootstrap_module, "CoreMemoryStore", StubCoreMemoryStore)
+    monkeypatch.setattr(bootstrap_module, "MidTermMemoryStore", StubMidTermMemoryStore)
     monkeypatch.setattr(bootstrap_module, "Blackboard", StubBlackboard)
     monkeypatch.setattr(bootstrap_module, "OutboxRelay", StubOutboxRelay)
     monkeypatch.setattr(bootstrap_module, "TaskMonitor", StubTaskMonitor)

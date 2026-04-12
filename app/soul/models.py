@@ -34,6 +34,7 @@ class Action:
     inner_thoughts: str = ""
     raw_response: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    streamed: bool = False
 
 
 @dataclass(slots=True)

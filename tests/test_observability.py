@@ -193,6 +193,7 @@ def test_runtime_health_snapshot_includes_observability_fields() -> None:
         core_memory_store=SimpleNamespace(),
         core_memory_cache=SimpleNamespace(),
         session_context_store=SimpleNamespace(),
+        mid_term_memory_store=SimpleNamespace(degraded=False, degraded_reason=None, storage_source="postgres"),
         vector_retriever=None,
         graph_store=None,
         event_bus=SimpleNamespace(degraded=True),
@@ -246,9 +247,79 @@ def test_runtime_health_snapshot_includes_observability_fields() -> None:
     assert health["subsystems"]["redis"]["reason"] == "redis_unavailable"
     assert health["subsystems"]["worker_manager"]["workers"] == 2
     assert health["subsystems"]["worker_manager"]["degraded_workers"] == 1
+    assert health["subsystems"]["mid_term_memory"]["reason"] is None
     assert health["subsystems"]["skill_loader"]["loaded_count"] == 2
     assert health["subsystems"]["mcp_loader"]["failed_count"] == 2
     assert health["subsystems"]["evolution_pipeline"]["pending_candidate_count"] == 1
     assert health["subsystems"]["relationship_stage"]["relationship_stage_enabled"] is True
     assert health["subsystems"]["gentle_proactivity"]["gentle_proactivity_enabled"] is True
     assert health["subsystems"]["memory_governance"]["memory_governance_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_health_snapshot_async_reports_qdrant_probe_failure() -> None:
+    runtime = RuntimeContext(
+        redis_client=None,
+        model_registry=object(),
+        outbox_store=SimpleNamespace(),
+        idempotency_store=SimpleNamespace(),
+        core_memory_store=SimpleNamespace(),
+        core_memory_cache=SimpleNamespace(),
+        session_context_store=SimpleNamespace(),
+        mid_term_memory_store=SimpleNamespace(degraded=False, degraded_reason=None, storage_source="postgres"),
+        vector_retriever=SimpleNamespace(ping=lambda: _async_tuple(False, "qdrant_bad_gateway")),
+        graph_store=None,
+        event_bus=SimpleNamespace(degraded=True),
+        event_bus_event_factory=lambda event_type, payload: (event_type, payload),
+        core_memory_scheduler=SimpleNamespace(),
+        evolution_journal=SimpleNamespace(),
+        evolution_candidate_manager=SimpleNamespace(
+            summary=lambda: {
+                "pending_candidate_count": 0,
+                "high_risk_pending_count": 0,
+                "recent_reverted_count": 0,
+                "degraded": False,
+            }
+        ),
+        relationship_state_machine=SimpleNamespace(degraded=False),
+        proactivity_service=SimpleNamespace(
+            degraded=False,
+            summary=lambda: {
+                "gentle_proactivity_enabled": True,
+                "gentle_proactivity_degraded": False,
+                "status": "ok",
+            },
+        ),
+        memory_governance_service=SimpleNamespace(degraded=False),
+        personality_evolver=SimpleNamespace(),
+        observer=SimpleNamespace(),
+        reflector=SimpleNamespace(),
+        cognition_updater=SimpleNamespace(),
+        evolution_scheduler=SimpleNamespace(_task=None),
+        task_store=SimpleNamespace(degraded=True),
+        task_system=SimpleNamespace(),
+        blackboard=SimpleNamespace(),
+        outbox_relay=SimpleNamespace(degraded=True),
+        task_monitor=SimpleNamespace(),
+        worker_manager=SimpleNamespace(workers=[]),
+        web_platform=SimpleNamespace(),
+        soul_engine=SimpleNamespace(),
+        action_router=SimpleNamespace(),
+        skill_loader=SimpleNamespace(),
+        mcp_adapter=SimpleNamespace(),
+        chat_trace_service=ChatTraceService(),
+        skill_summary={"loaded": [], "skipped": [], "failed": []},
+        mcp_summary={"loaded": [], "skipped": [], "failed": []},
+        builtins_summary={},
+        startup_degraded_reasons=[],
+    )
+
+    health = await runtime.health_snapshot_async()
+
+    assert health["status"] == "degraded"
+    assert health["subsystems"]["qdrant"]["status"] == "degraded"
+    assert health["subsystems"]["qdrant"]["reason"] == "qdrant_bad_gateway"
+
+
+async def _async_tuple(ok: bool, reason: str | None) -> tuple[bool, str | None]:
+    return ok, reason

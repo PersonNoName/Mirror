@@ -3,16 +3,29 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.memory import (
+    AgentContinuityState,
     CapabilityEntry,
     CoreMemory,
     DurableMemory,
     MemoryEntry,
+    MidTermMemoryItem,
     RelationshipMemory,
     TaskExperience,
+    UserEmotionalState,
     WorldModel,
+)
+from app.memory.emotion_constants import (
+    detect_emotion_class,
+    detect_emotional_risk,
+    detect_duration_hint,
+    detect_intensity,
+    text_has_topic_overlap,
+    VULNERABLE_EMOTION_CLASSES,
 )
 from app.hooks import HookPoint, HookRegistry
 from app.memory import CoreMemoryCache, SessionContextStore, VectorRetriever
@@ -31,6 +44,7 @@ class SoulEngine:
         model_registry: ModelProviderRegistry,
         core_memory_cache: CoreMemoryCache,
         session_context_store: SessionContextStore | None,
+        mid_term_memory_store: Any | None,
         vector_retriever: VectorRetriever | None,
         tool_registry: Any,
         hook_registry: HookRegistry | None = None,
@@ -40,13 +54,19 @@ class SoulEngine:
         self.model_registry = model_registry
         self.core_memory_cache = core_memory_cache
         self.session_context_store = session_context_store
+        self.mid_term_memory_store = mid_term_memory_store
         self.vector_retriever = vector_retriever
         self.tool_registry = tool_registry
         self.hook_registry = hook_registry
         self.proactivity_service = proactivity_service
         self.trace_service = trace_service
 
-    async def run(self, message: InboundMessage) -> Action:
+    async def run(
+        self,
+        message: InboundMessage,
+        *,
+        on_direct_reply_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> Action:
         """Reason about an inbound message and produce a structured action."""
 
         if self.hook_registry is not None:
@@ -82,6 +102,24 @@ class SoulEngine:
             "Session adaptations loaded",
             {"count": len(session_adaptations), "items": session_adaptations[:10]},
         )
+        mid_term_memories = await self._get_mid_term_memories(message)
+        await self._trace_step(
+            message,
+            "retrieval",
+            "Mid-term memory retrieval finished",
+            {
+                "count": len(mid_term_memories),
+                "matches": [
+                    {
+                        "memory_key": item.memory_key,
+                        "content_preview": item.content[:120],
+                        "strength": item.strength,
+                        "last_seen_at": item.last_seen_at,
+                    }
+                    for item in mid_term_memories[:5]
+                ],
+            },
+        )
         retrieved = await self._retrieve_context(message)
         await self._trace_step(
             message,
@@ -115,9 +153,19 @@ class SoulEngine:
                 "stored_preference": support_policy.stored_preference,
             },
         )
+        brain = self._build_brain_snapshot(
+            core_memory,
+            recent_messages,
+            session_adaptations,
+            mid_term_memories,
+            retrieved,
+            emotional_context,
+            support_policy,
+        )
 
         if emotional_context.emotional_risk == "high":
             action = self._high_risk_emotional_action(message, emotional_context)
+            action.metadata["brain"] = brain
             if self.hook_registry is not None:
                 await self.hook_registry.trigger(
                     HookPoint.POST_REASON,
@@ -132,6 +180,7 @@ class SoulEngine:
             core_memory,
             recent_messages,
             session_adaptations,
+            mid_term_memories,
             retrieved,
             emotional_context,
             support_policy,
@@ -139,30 +188,50 @@ class SoulEngine:
 
         api_key = self.model_registry.specs["reasoning.main"].api_key_ref
         if not api_key:
-            return self._fallback_action(message)
+            action = self._fallback_action(message)
+            action.metadata["brain"] = brain
+            return action
 
         messages = [
             {"role": "system", "content": prompt},
             {"role": "user", "content": message.text},
         ]
+        chat_model = self.model_registry.chat("reasoning.main")
+
+        parsed: Action | None = None
+        raw_text = ""
         try:
-            response = await self.model_registry.chat("reasoning.main").generate(messages)
-        except (ProviderRequestError, KeyError, NotImplementedError, ValueError):
+            if on_direct_reply_delta is not None and "streaming" in (message.platform_ctx.capabilities if message.platform_ctx else set()):
+                try:
+                    parsed, raw_text = await self._run_streaming_reasoning(
+                        chat_model,
+                        messages,
+                        on_direct_reply_delta=on_direct_reply_delta,
+                    )
+                except NotImplementedError:
+                    response = await chat_model.generate(messages)
+                    raw_text = self._extract_response_text(response)
+                    parsed = self._parse_action(raw_text)
+            else:
+                response = await chat_model.generate(messages)
+                raw_text = self._extract_response_text(response)
+                parsed = self._parse_action(raw_text)
+        except (ProviderRequestError, KeyError, ValueError):
             action = self._fallback_action(message)
             if self.hook_registry is not None:
                 await self.hook_registry.trigger(HookPoint.POST_REASON, message=message, action=action, prompt=prompt)
             await self._trace_action(message, action, "Fallback action generated because reasoning model was unavailable")
             return action
 
-        raw_text = self._extract_response_text(response)
-        parsed = self._parse_action(raw_text)
         if parsed is None:
             action = self._fallback_action(message, raw_response=raw_text)
+            action.metadata["brain"] = brain
             if self.hook_registry is not None:
                 await self.hook_registry.trigger(HookPoint.POST_REASON, message=message, action=action, prompt=prompt)
             await self._trace_action(message, action, "Fallback action generated because model output could not be parsed")
             return action
         parsed.raw_response = raw_text
+        parsed.metadata["brain"] = brain
         if self.hook_registry is not None:
             await self.hook_registry.trigger(HookPoint.POST_REASON, message=message, action=parsed, prompt=prompt)
         await self._trace_action(message, parsed, "Structured action generated")
@@ -219,6 +288,18 @@ class SoulEngine:
         except Exception:
             return {"matches": []}
 
+    async def _get_mid_term_memories(self, message: InboundMessage) -> list[MidTermMemoryItem]:
+        if self.mid_term_memory_store is None:
+            return []
+        try:
+            return await self.mid_term_memory_store.retrieve(
+                user_id=message.user_id,
+                query=message.text,
+                limit=5,
+            )
+        except Exception:
+            return []
+
     async def _get_session_adaptations(self, message: InboundMessage) -> list[str]:
         if self.session_context_store is None:
             return []
@@ -232,6 +313,7 @@ class SoulEngine:
         core_memory: CoreMemory,
         recent_messages: list[dict[str, Any]],
         session_adaptations_live: list[str],
+        mid_term_memories: list[MidTermMemoryItem],
         retrieved: dict[str, Any],
         emotional_context: EmotionalInterpretation,
         support_policy: SupportPolicyDecision,
@@ -255,6 +337,7 @@ class SoulEngine:
         recent_dialogue = "\n".join(
             f"{item.get('role', 'unknown')}: {item.get('content', '')}" for item in recent_messages[-5:]
         ) or "No recent dialogue."
+        mid_term_context = self._format_mid_term_memories(mid_term_memories)
         retrieved_context = "\n".join(
             (
                 f"- [{item.get('namespace', 'unknown')}|{item.get('truth_type', 'fact')}|"
@@ -273,6 +356,12 @@ class SoulEngine:
                     relationship_stage=self._format_relationship_stage(core_memory.world_model),
                     proactivity_policy=self._format_proactivity_policy(core_memory),
                     emotional_context=self._format_emotional_context(emotional_context),
+                    user_emotional_state=self._format_user_emotional_state(
+                        self._effective_user_emotional_state(core_memory.user_emotional_state)
+                    ),
+                    agent_continuity_state=self._format_agent_continuity_state(
+                        self._effective_agent_continuity_state(core_memory.agent_continuity_state)
+                    ),
                     support_policy=self._format_support_policy(support_policy),
                     session_adaptations=(
                         "These adaptations are temporary and only apply to the current session.\n"
@@ -282,9 +371,62 @@ class SoulEngine:
                     tool_list=tool_list,
                 ),
                 f"## Session Raw Context\n{recent_dialogue}",
+                (
+                    "## Recent Cross-Session Context\n"
+                    "These items may be stale. Prefer recent mentions over older ones.\n"
+                    f"{mid_term_context}"
+                ),
                 f"## Retrieved Context\n{retrieved_context}",
             ]
         )
+
+    def _build_brain_snapshot(
+        self,
+        core_memory: CoreMemory,
+        recent_messages: list[dict[str, Any]],
+        session_adaptations_live: list[str],
+        mid_term_memories: list[MidTermMemoryItem],
+        retrieved: dict[str, Any],
+        emotional_context: EmotionalInterpretation,
+        support_policy: SupportPolicyDecision,
+    ) -> dict[str, str]:
+        tool_descriptions = self.tool_registry.describe_tools()
+        tool_list = "\n".join(
+            f"- {item['name']}: {item['description'] or 'No description'} | schema={item['schema']}"
+            for item in tool_descriptions
+        ) or "- No tools are currently registered."
+        core_personality = core_memory.personality.core_personality
+        behavioral_rules = "\n".join(
+            f"- {rule.rule}" for rule in core_personality.behavioral_rules
+        ) or "- No persistent behavioral rules."
+        persisted_adaptations = list(core_memory.personality.session_adaptation.current_items)
+        merged_adaptations = persisted_adaptations + [
+            item for item in session_adaptations_live if item not in persisted_adaptations
+        ]
+        session_adaptations = "\n".join(f"- {item}" for item in merged_adaptations) or "- No active session adaptations for this session."
+
+        return {
+            "self_cognition": self._format_self_cognition(core_memory),
+            "world_model": self._format_world_model(core_memory.world_model),
+            "stable_identity": self._format_stable_identity(core_memory, behavioral_rules),
+            "relationship_style": self._format_relationship_style(core_memory),
+            "relationship_stage": self._format_relationship_stage(core_memory.world_model),
+            "proactivity_policy": self._format_proactivity_policy(core_memory),
+            "emotional_context": self._format_emotional_context(emotional_context),
+            "user_emotional_state": self._format_user_emotional_state(
+                self._effective_user_emotional_state(core_memory.user_emotional_state)
+            ),
+            "agent_continuity_state": self._format_agent_continuity_state(
+                self._effective_agent_continuity_state(core_memory.agent_continuity_state)
+            ),
+            "support_policy": self._format_support_policy(support_policy),
+            "session_adaptations": (
+                "These adaptations are temporary and only apply to the current session.\n"
+                f"{session_adaptations}"
+            ),
+            "task_experience": self._format_task_experience(core_memory.task_experience),
+            "tool_list": tool_list,
+        }
 
     @staticmethod
     def _format_memory_entries(entries: list[MemoryEntry], empty_text: str) -> str:
@@ -486,6 +628,18 @@ class SoulEngine:
         return "\n".join(lines) or f"- {empty_text}"
 
     @staticmethod
+    def _format_mid_term_memories(entries: list[MidTermMemoryItem]) -> str:
+        lines = []
+        for entry in entries:
+            content = str(entry.content).strip()
+            if not content:
+                continue
+            lines.append(
+                f"- [{entry.memory_type}|strength={entry.strength:.2f}|mentions={entry.mention_count}|last_seen={entry.last_seen_at}] {content}"
+            )
+        return "\n".join(lines) or "- No recent cross-session context."
+
+    @staticmethod
     def _format_emotional_context(emotional_context: EmotionalInterpretation) -> str:
         return "\n".join(
             [
@@ -495,6 +649,66 @@ class SoulEngine:
                 f"- support_preference={emotional_context.support_preference}",
                 f"- support_mode={emotional_context.support_mode}",
                 f"- emotional_risk={emotional_context.emotional_risk}",
+            ]
+        )
+
+    @staticmethod
+    def _format_user_emotional_state(state: UserEmotionalState | None) -> str:
+        if state is None:
+            return "\n".join(
+                [
+                    "- active=false",
+                    "- carryover=none",
+                    "- support_mode=blended",
+                    "- support_preference=unknown",
+                    "- unresolved_topics=none",
+                    "- state_hint=No active cross-session emotional carryover.",
+                ]
+            )
+        unresolved_topics = ", ".join(item for item in state.unresolved_topics if item) or "none"
+        return "\n".join(
+            [
+                "- active=true",
+                f"- emotion_class={state.emotion_class}",
+                f"- intensity={state.intensity}",
+                f"- emotional_risk={state.emotional_risk}",
+                f"- support_mode={state.support_mode}",
+                f"- support_preference={state.support_preference}",
+                f"- stability={state.stability}",
+                f"- unresolved_topics={unresolved_topics}",
+                f"- last_observed_at={state.last_observed_at or 'unknown'}",
+                f"- carryover_until={state.carryover_until or 'unknown'}",
+                f"- carryover_summary={state.carryover_summary or 'No emotional summary recorded.'}",
+            ]
+        )
+
+    @staticmethod
+    def _format_agent_continuity_state(state: AgentContinuityState | None) -> str:
+        if state is None:
+            return "\n".join(
+                [
+                    "- active=false",
+                    "- caution_level=low",
+                    "- warmth_level=medium",
+                    "- repair_mode=false",
+                    "- recovery_mode=false",
+                    "- relational_confidence=0.50",
+                    "- continuity_hint=No active cross-session agent continuity shift.",
+                ]
+            )
+        active_signals = ", ".join(item for item in state.active_signals if item) or "none"
+        return "\n".join(
+            [
+                "- active=true",
+                f"- caution_level={state.caution_level}",
+                f"- warmth_level={state.warmth_level}",
+                f"- repair_mode={str(state.repair_mode).lower()}",
+                f"- recovery_mode={str(state.recovery_mode).lower()}",
+                f"- relational_confidence={state.relational_confidence:.2f}",
+                f"- active_signals={active_signals}",
+                f"- last_event_at={state.last_event_at or 'unknown'}",
+                f"- last_shift_reason={state.last_shift_reason or 'No recent shift recorded.'}",
+                f"- continuity_summary={state.continuity_summary or 'No continuity summary recorded.'}",
             ]
         )
 
@@ -569,52 +783,42 @@ class SoulEngine:
     @classmethod
     def _interpret_emotion(cls, text: str, core_memory: CoreMemory) -> EmotionalInterpretation:
         normalized = text.lower()
-        support_preference = cls._resolve_stored_support_preference(core_memory.world_model)
-        emotion_class = "neutral"
-        intensity = "low"
-        duration_hint = "unknown"
-        emotional_risk = cls._emotional_risk(normalized)
+        support_preference = cls._resolve_stored_support_preference(core_memory)
 
-        emotion_keywords = {
-            "overwhelm": ("overwhelmed", "撑不住", "太多了", "崩溃", "burned out"),
-            "anxiety": ("anxious", "anxiety", "panic", "紧张", "害怕", "慌"),
-            "sadness": ("sad", "depressed", "难过", "伤心", "低落"),
-            "loneliness": ("lonely", "alone", "孤独", "没人懂"),
-            "anger": ("angry", "furious", "气死", "愤怒"),
-            "frustration": ("frustrated", "annoyed", "烦", "挫败", "受不了"),
-            "relief": ("relieved", "松了口气", "终于好了"),
-            "joy": ("happy", "excited", "开心", "高兴"),
-        }
-        for candidate, tokens in emotion_keywords.items():
-            if any(token in normalized for token in tokens):
-                emotion_class = candidate
-                break
+        # Use shared constants for detection
+        emotion_class = detect_emotion_class(normalized)
+        intensity = detect_intensity(normalized, emotion_class)
+        duration_hint = detect_duration_hint(normalized)
+        emotional_risk = detect_emotional_risk(normalized)
 
-        high_intensity_tokens = (
-            "extremely",
-            "severely",
-            "completely",
-            "totally",
-            "really bad",
-            "struggling",
-            "马上",
-            "立刻",
-            "完全",
-            "崩溃",
-            "撑不住",
-        )
-        medium_intensity_tokens = ("very", "pretty", "really", "很", "特别", "非常")
-        if any(token in normalized for token in high_intensity_tokens):
-            intensity = "high"
-        elif any(token in normalized for token in medium_intensity_tokens) or emotion_class != "neutral":
-            intensity = "medium"
+        # Merge carryover from previous session — but guard against
+        # "ghost emotion" inheritance on unrelated messages.
+        carryover = cls._effective_user_emotional_state(core_memory.user_emotional_state)
+        if carryover is not None:
+            # Only inherit carryover emotion when the current message is
+            # topically related OR the current message itself is emotional.
+            # This prevents a neutral "帮我看段代码" from being tagged as
+            # anxious just because the previous session had anxiety.
+            current_is_emotional = emotion_class != "neutral"
+            topic_related = text_has_topic_overlap(
+                normalized, carryover.unresolved_topics
+            )
+            should_inherit = current_is_emotional or topic_related
 
-        if any(token in normalized for token in ("for months", "for weeks", "一直", "长期", "最近一直", "ongoing")):
-            duration_hint = "ongoing"
-        elif any(token in normalized for token in ("recently", "these days", "最近", "这几天")):
-            duration_hint = "recent"
-        elif any(token in normalized for token in ("right now", "today", "现在", "刚刚")):
-            duration_hint = "momentary"
+            if should_inherit:
+                if emotion_class == "neutral" and carryover.emotion_class != "neutral":
+                    emotion_class = carryover.emotion_class
+                if intensity == "low" and carryover.intensity in {"medium", "high"}:
+                    intensity = carryover.intensity
+                if duration_hint == "unknown":
+                    duration_hint = "carryover"
+                if emotional_risk == "low" and carryover.emotional_risk in {"medium", "high"}:
+                    emotional_risk = carryover.emotional_risk
+
+            # Support preference is always safe to inherit regardless
+            # of topic overlap — it is a user trait, not a momentary signal.
+            if support_preference == "unknown" and carryover.support_preference != "unknown":
+                support_preference = carryover.support_preference
 
         return EmotionalInterpretation(
             emotion_class=emotion_class,
@@ -633,8 +837,10 @@ class SoulEngine:
         emotional_context: EmotionalInterpretation,
     ) -> SupportPolicyDecision:
         normalized = text.lower()
-        stored_preference = cls._resolve_stored_support_preference(core_memory.world_model)
+        carryover = cls._effective_user_emotional_state(core_memory.user_emotional_state)
+        stored_preference = cls._resolve_stored_support_preference(core_memory)
         explicit_preference = cls._detect_explicit_support_preference(normalized)
+        carryover_mode = carryover.support_mode if carryover is not None else "blended"
 
         if emotional_context.emotional_risk in {"medium", "high"}:
             return SupportPolicyDecision(
@@ -671,6 +877,21 @@ class SoulEngine:
                 stored_preference=stored_preference,
                 rationale="Stored support preference suggests concise actionable help unless the user asks otherwise.",
             )
+        if (
+            carryover is not None
+            and carryover_mode in {"listening", "problem_solving"}
+            and emotional_context.emotion_class in {"sadness", "anxiety", "loneliness", "overwhelm", carryover.emotion_class}
+        ):
+            return SupportPolicyDecision(
+                support_mode=carryover_mode,
+                inferred_preference=(
+                    carryover.support_preference
+                    if carryover.support_preference != "unknown"
+                    else stored_preference
+                ),
+                stored_preference=stored_preference,
+                rationale="Recent cross-session emotional carryover suggests preserving the prior support style unless the user redirects.",
+            )
         if emotional_context.emotion_class in {"sadness", "anxiety", "loneliness", "overwhelm"}:
             return SupportPolicyDecision(
                 support_mode="listening",
@@ -686,14 +907,86 @@ class SoulEngine:
         )
 
     @staticmethod
-    def _resolve_stored_support_preference(world_model: WorldModel) -> str:
-        for entry in world_model.confirmed_facts + world_model.inferred_memories:
+    def _resolve_stored_support_preference(core_memory: CoreMemory) -> str:
+        carryover = SoulEngine._effective_user_emotional_state(core_memory.user_emotional_state)
+        if carryover is not None and carryover.support_preference in {"listening", "problem_solving", "mixed"}:
+            return carryover.support_preference
+        for entry in core_memory.world_model.confirmed_facts + core_memory.world_model.inferred_memories:
             if not str(getattr(entry, "memory_key", "")).startswith("support_preference:"):
                 continue
             _, _, preference = str(entry.memory_key).partition(":")
             if preference in {"listening", "problem_solving", "mixed"}:
                 return preference
         return "unknown"
+
+    @staticmethod
+    def _effective_user_emotional_state(
+        state: UserEmotionalState,
+    ) -> UserEmotionalState | None:
+        if not state.carryover_until and not state.last_observed_at:
+            return None
+        now = datetime.now(timezone.utc)
+        carryover_until = SoulEngine._parse_timestamp(state.carryover_until)
+        if carryover_until is not None and carryover_until < now:
+            return None
+        if carryover_until is None:
+            last_observed_at = SoulEngine._parse_timestamp(state.last_observed_at)
+            if last_observed_at is None or now - last_observed_at > timedelta(days=7):
+                return None
+        return state
+
+    @staticmethod
+    def _effective_agent_continuity_state(
+        state: AgentContinuityState,
+    ) -> AgentContinuityState | None:
+        """Return the agent continuity state with gradual decay.
+
+        Instead of a hard 7-day cliff, the state gracefully decays:
+        - Days 0-3: full state as-is
+        - Days 3-7: caution_level is reduced, repair_mode cleared
+        - Day 7+: returns None
+        """
+        if (
+            not state.last_event_at
+            and not state.active_signals
+            and not state.last_shift_reason
+            and not state.continuity_summary
+        ):
+            return None
+        now = datetime.now(timezone.utc)
+        reference = SoulEngine._parse_timestamp(state.last_event_at) or SoulEngine._parse_timestamp(state.updated_at)
+        if reference is None:
+            return None
+        elapsed = now - reference
+        if elapsed > timedelta(days=7):
+            return None
+        # Gradual decay: after 3 days, start reducing caution
+        if elapsed > timedelta(days=3):
+            from copy import copy
+            decayed = copy(state)
+            if decayed.caution_level == "high":
+                decayed.caution_level = "medium"
+            elif decayed.caution_level == "medium":
+                decayed.caution_level = "low"
+            decayed.repair_mode = False
+            # Reduce relational_confidence decay (partially recovered)
+            decayed.relational_confidence = min(
+                0.7, decayed.relational_confidence + 0.1
+            )
+            return decayed
+        return state
+
+    @staticmethod
+    def _parse_timestamp(value: str) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     @staticmethod
     def _detect_explicit_support_preference(text: str) -> str:
@@ -725,35 +1018,7 @@ class SoulEngine:
 
     @staticmethod
     def _emotional_risk(text: str) -> str:
-        high_risk_tokens = (
-            "kill myself",
-            "suicide",
-            "end my life",
-            "hurt myself",
-            "self harm",
-            "kill them",
-            "hurt someone",
-            "撑不住了",
-            "不想活了",
-            "想自杀",
-            "伤害自己",
-            "伤害别人",
-            "马上要出事",
-        )
-        medium_risk_tokens = (
-            "can't go on",
-            "falling apart",
-            "i'm breaking down",
-            "i feel unsafe",
-            "崩溃边缘",
-            "快不行了",
-            "活不下去",
-        )
-        if any(token in text for token in high_risk_tokens):
-            return "high"
-        if any(token in text for token in medium_risk_tokens):
-            return "medium"
-        return "low"
+        return detect_emotional_risk(text)
 
     @staticmethod
     def _high_risk_emotional_action(
@@ -789,3 +1054,102 @@ class SoulEngine:
             inner_thoughts="Reasoning model unavailable. Return a safe direct reply.",
             raw_response=raw_response,
         )
+
+    async def _run_streaming_reasoning(
+        self,
+        chat_model: Any,
+        messages: list[dict[str, Any]],
+        *,
+        on_direct_reply_delta: Callable[[str], Awaitable[None]],
+    ) -> tuple[Action | None, str]:
+        buffer = ""
+        emitted_reply = ""
+        action_type: str | None = None
+        content_started = False
+        content_emitted_chars = 0
+        stream_started = False
+
+        try:
+            async for chunk in chat_model.stream(messages):
+                stream_started = True
+                text = self._extract_stream_text(chunk)
+                if not text:
+                    continue
+                buffer += text
+                if action_type is None:
+                    action_type = self._extract_action_type(buffer)
+                if action_type != "direct_reply":
+                    continue
+                open_index = buffer.find("<content>")
+                if open_index < 0:
+                    continue
+                content_started = True
+                content_region = buffer[open_index + len("<content>") :]
+                close_index = content_region.find("</content>")
+                if close_index >= 0:
+                    safe_text = content_region[:close_index]
+                else:
+                    holdback = len("</content>") - 1
+                    safe_text = content_region[:-holdback] if len(content_region) > holdback else ""
+                new_delta = safe_text[content_emitted_chars:]
+                if new_delta:
+                    emitted_reply += new_delta
+                    content_emitted_chars += len(new_delta)
+                    await on_direct_reply_delta(new_delta)
+        except (ProviderRequestError, KeyError, ValueError):
+            if stream_started and (content_started or emitted_reply):
+                action = Action(
+                    type="direct_reply",
+                    content=emitted_reply,
+                    raw_response=buffer,
+                    streamed=bool(emitted_reply),
+                    metadata={"stream_interrupted": True},
+                )
+                return action, buffer
+            raise
+
+        parsed = self._parse_action(buffer)
+        if parsed is None and emitted_reply:
+            return (
+                Action(
+                    type="direct_reply",
+                    content=emitted_reply,
+                    raw_response=buffer,
+                    streamed=True,
+                    metadata={"parse_incomplete": True},
+                ),
+                buffer,
+            )
+        if parsed is not None and parsed.type == "direct_reply" and emitted_reply:
+            parsed.streamed = True
+        return parsed, buffer
+
+    @staticmethod
+    def _extract_stream_text(chunk: Any) -> str:
+        if isinstance(chunk, str):
+            return chunk
+        if not isinstance(chunk, dict):
+            return ""
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            return ""
+        delta = choice.get("delta")
+        if isinstance(delta, dict):
+            content = delta.get("content")
+            if isinstance(content, str):
+                return content
+        message = choice.get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+        text = choice.get("text")
+        return text if isinstance(text, str) else ""
+
+    @staticmethod
+    def _extract_action_type(raw_text: str) -> str | None:
+        match = re.search(r"<action>\s*(.*?)\s*</action>", raw_text, re.S)
+        return match.group(1).strip() if match else None

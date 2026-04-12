@@ -1,0 +1,48 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Noto+Serif:ital,wght@0,400;0,700;1,400&display=swap');
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  --color-primary: #2d5a27;
+  --color-on-primary: #ffffff;
+  --color-secondary: #5d4037;
+  --color-on-secondary: #ffffff;
+  --color-tertiary: #8d6e63;
+  --color-background: #fdf8f1;
+  --color-surface: #f7f2ea;
+  --color-surface-container-low: #f1e9dc;
+  --color-surface-container: #ece2d0;
+  --color-surface-container-high: #e4d8c3;
+  --color-surface-container-highest: #dbceb6;
+  --color-outline: #7d7463;
+  --color-on-surface: #2d2924;
+  --color-on-surface-variant: #4d453e;
+
+  --font-headline: "Noto Serif", serif;
+  --font-body: "Newsreader", serif;
+  --font-label: "Plus Jakarta Sans", sans-serif;
+
+  --radius-3xl: 2.5rem;
+}
+
+@layer base {
+  body {
+    @apply bg-background text-on-surface font-label;
+  }
+}
+
+.grain-texture {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+  opacity: 0.04;
+}
+
+.tactile-card {
+  box-shadow: 0 4px 6px -1px rgba(93, 64, 55, 0.1), 0 2px 4px -1px rgba(93, 64, 55, 0.06);
+  border: 1px solid rgba(93, 64, 55, 0.05);
+}
+
+.recessed-field {
+  box-shadow: inset 0 2px 8px rgba(93, 64, 55, 0.08);
+  border: 1px solid rgba(93, 64, 55, 0.1);
+}
+

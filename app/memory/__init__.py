@@ -1,6 +1,7 @@
 """Memory subsystem package."""
 
 from app.memory.core_memory import (
+    AgentContinuityState,
     BehavioralRule,
     CapabilityEntry,
     CorePersonality,
@@ -23,16 +24,19 @@ from app.memory.core_memory import (
     SessionAdaptation,
     SelfCognition,
     TaskExperience,
+    UserEmotionalState,
     WorldModel,
 )
 from app.memory.core_memory_store import CoreMemoryStore
 from app.memory.governance import MemoryGovernanceService
 from app.memory.graph_store import GraphStore
+from app.memory.mid_term_memory import MidTermMemoryItem, MidTermMemoryStore
 from app.memory.session_context import SessionContextStore
 from app.memory.vector_retriever import VectorRetriever
 
 __all__ = [
     "BehavioralRule",
+    "AgentContinuityState",
     "CapabilityEntry",
     "CorePersonality",
     "CORE_MEMORY_INVALIDATION_CHANNEL",
@@ -47,6 +51,8 @@ __all__ = [
     "MemoryGovernancePolicy",
     "MemoryGovernanceService",
     "MemoryEntry",
+    "MidTermMemoryItem",
+    "MidTermMemoryStore",
     "PersonalityState",
     "ProactivityOpportunity",
     "ProactivityPolicy",
@@ -58,6 +64,7 @@ __all__ = [
     "SessionContextStore",
     "SelfCognition",
     "TaskExperience",
+    "UserEmotionalState",
     "VectorRetriever",
     "WorldModel",
 ]

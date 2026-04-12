@@ -16,6 +16,7 @@ from app.api.memory import router as memory_router
 from app.evolution.event_bus import Event, EventType
 from app.infra.outbox import OutboxEvent
 from app.memory import CoreMemory
+from app.observability import ChatTraceService
 from app.platform.web import WebPlatformAdapter
 from app.soul import ActionRouter, SoulEngine
 from app.tasks import Blackboard, TaskResult, TaskStore, TaskSystem, TaskWorker
@@ -70,6 +71,16 @@ class IntegrationEventBus:
 
     async def emit(self, event: Event) -> None:
         self.events.append(event)
+
+
+class RecordingVectorRetriever:
+    def __init__(self, matches: list[dict[str, Any]]) -> None:
+        self.matches = matches
+        self.queries: list[str] = []
+
+    async def retrieve(self, user_id: str, query: str, limit: int = 8) -> dict[str, Any]:
+        self.queries.append(query)
+        return {"matches": list(self.matches)[:limit]}
 
 
 class FakeRedisClient:
@@ -143,9 +154,15 @@ def build_runtime_app(
         event_bus=event_bus,
     )
     soul_engine = SoulEngine(
-        model_registry=DummyModelRegistry(chat_model=DummyChatModel(response=_chat_payload(chat_response))),
+        model_registry=DummyModelRegistry(
+            chat_model=DummyChatModel(
+                response=_chat_payload(chat_response),
+                stream_chunks=_stream_payload(chat_response),
+            )
+        ),
         core_memory_cache=core_memory_cache,
         session_context_store=session_store,
+        mid_term_memory_store=None,
         vector_retriever=vector_retriever,
         tool_registry=ToolRegistry(),
     )
@@ -182,6 +199,7 @@ def build_runtime_app(
         correct_memory=_correct_memory_default,
         delete_memory=_delete_memory_default,
     )
+    app.state.chat_trace_service = ChatTraceService(emitter=web_platform.emit_trace)
     app.state.streaming_disabled = streaming_disabled
 
     runtime = {
@@ -203,7 +221,13 @@ async def _list_recent_empty(limit: int = 20, user_id: str | None = None) -> lis
     return []
 
 
-async def _list_memory_empty(*, user_id: str, include_candidates: bool = True, include_superseded: bool = False) -> list[Any]:
+async def _list_memory_empty(
+    *,
+    user_id: str,
+    include_candidates: bool = True,
+    include_superseded: bool = False,
+    include_mid_term: bool = False,
+) -> list[Any]:
     return []
 
 
@@ -246,6 +270,13 @@ def _chat_payload(content: str) -> dict[str, Any]:
     return {"choices": [{"message": {"content": content}}]}
 
 
+def _stream_payload(content: str, chunk_size: int = 24) -> list[dict[str, Any]]:
+    return [
+        {"choices": [{"delta": {"content": content[index : index + chunk_size]}}]}
+        for index in range(0, len(content), chunk_size)
+    ]
+
+
 def _latest_task_id(runtime: dict[str, Any]) -> str:
     assert runtime["outbox_store"].events
     task_payload = runtime["outbox_store"].events[-1].payload["task"]
@@ -275,21 +306,28 @@ def test_integration_chat_direct_reply_happy_path_with_stream_fanout() -> None:
     events = drain_queue(queue)
 
     assert response.status_code == 200
-    assert response.json() == {
-        "reply": "Hello from integration.",
-        "session_id": "session-1",
-        "user_id": "user-1",
-        "status": "completed",
-        "meta": None,
-    }
+    body = response.json()
+    assert body["reply"] == "Hello from integration."
+    assert body["session_id"] == "session-1"
+    assert body["user_id"] == "user-1"
+    assert body["status"] == "completed"
+    assert body["meta"]["trace_id"]
+    assert body["brain"]["self_cognition"]
+    assert body["brain"]["session_adaptations"]
     assert runtime["core_memory_cache"].active_sessions == [("user-1", "session-1")]
     assert await_sync(runtime["session_context_store"].get_recent_messages("user-1", "session-1")) == [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "Hello from integration."},
     ]
     assert runtime["event_bus"].events[0].type == EventType.DIALOGUE_ENDED
-    assert [event["event"] for event in events] == ["delta", "message", "done"]
-    assert events[1]["data"]["content"] == "Hello from integration."
+    filtered = non_trace_events(events)
+    assert filtered[0]["event"] == "delta"
+    assert filtered[-2]["event"] == "message"
+    assert filtered[-1]["event"] == "done"
+    assert any(event["event"] == "delta" for event in filtered)
+    assert any(event["event"] == "trace" for event in events)
+    assert filtered[-2]["data"]["content"] == "Hello from integration."
+    assert filtered[-2]["data"]["metadata"]["brain"]["world_model"]
 
 
 def test_integration_chat_publish_task_then_worker_completion() -> None:
@@ -369,8 +407,10 @@ def test_integration_hitl_response_loop() -> None:
     }
     assert any(event.type == EventType.TASK_WAITING_HITL for event in runtime["event_bus"].events)
     assert any(event.type == EventType.HITL_FEEDBACK for event in runtime["event_bus"].events)
-    assert [event["event"] for event in events] == ["message", "done"]
-    assert events[1]["data"]["status"] == "waiting_hitl"
+    filtered = non_trace_events(events)
+    assert [event["event"] for event in filtered] == ["message", "done"]
+    assert any(event["event"] == "trace" for event in events)
+    assert filtered[1]["data"]["status"] == "waiting_hitl"
 
 
 def test_integration_degraded_streaming_unavailable_but_chat_safe() -> None:
@@ -431,6 +471,41 @@ def test_integration_high_risk_emotional_message_bypasses_publish_task() -> None
     assert runtime["outbox_store"].events == []
 
 
+def test_integration_chat_repairs_mojibake_before_retrieval() -> None:
+    vector_retriever = RecordingVectorRetriever(
+        matches=[
+            {
+                "namespace": "conversation_episode",
+                "content": "Previous conversation on 2026-04-12. User said: \"我们之前都聊了些什么\".",
+                "score": 0.9,
+                "truth_type": "fact",
+                "status": "active",
+            }
+        ]
+    )
+    app, _runtime = build_runtime_app(
+        chat_response=(
+            "<inner_thoughts>use retrieved context</inner_thoughts>"
+            "<action>direct_reply</action>"
+            "<content>We discussed earlier context.</content>"
+        ),
+        vector_retriever=vector_retriever,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/chat",
+            json={
+                "text": "æä»¬ä¹åé½èäºäºä»ä¹å",
+                "session_id": "session-1",
+                "user_id": "user-1",
+            },
+        )
+
+    assert response.status_code == 200
+    assert vector_retriever.queries == ["我们之前都聊了些什么啊"]
+
+
 async def _async_noop_message(user_id: str, session_id: str, message: dict[str, Any]) -> None:
     return None
 
@@ -448,6 +523,10 @@ def drain_queue(queue: Any) -> list[dict[str, Any]]:
     while not queue.empty():
         items.append(queue.get_nowait())
     return items
+
+
+def non_trace_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [event for event in events if event.get("event") != "trace"]
 
 
 def await_sync(awaitable: Any) -> Any:

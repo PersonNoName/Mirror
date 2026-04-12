@@ -6,6 +6,7 @@
 > **v3.2 更新内容**：重构人格进化系统——以「行为规则」替代数值特质作为主要进化载体；引入「双速进化」机制（快适应+慢进化）；新增进化可见性成长日志（EvolutionJournal）。
 > **v3.3 更新内容**：Token 预算提升至 5000 并引入动态储备池；Core Memory 语义从 per-session 改为 per-user；补充 InteractionSignal 信号抽取器定义；完善规则语义去重、进化链式触发、SSE 连接复用、分关系类型置信度衰减等细节。
 > **v3.4 更新内容**：补充 Provider 抽象层（Chat / Embedding / Reranker）与模型路由配置，明确 `openai_compatible` 协议族与 vendor 解耦；新增 Platform 预留接口层；修复 `ActionRouter → Blackboard.assign()` 接口不一致、HITL 挂起状态缺失、Core Memory 多租户写入键不完整等可实现性问题；补全损坏的 `Observer / MetaCognitionReflector` 文档段落。
+> **v3.5 更新内容**：新增跨 session 中期记忆层（MidTermMemoryStore），形成"SessionContextStore → MidTermMemoryStore → CoreMemory/GraphStore"三层记忆架构；中期记忆支持确定性衰减、过期、跨 session 召回及晋升规则（30天内3次、至少2个session、最近14天仍提及则晋升至长期）；SoulEngine 前台推理在 session context 之后读取 cross-session context；治理 API 补齐 GET /memory/mid-term、POST /memory/mid-term/delete 及 include_mid_term 参数；长期记忆纠正/删除时同步压制相关中期项。
 
 ---
 
@@ -63,7 +64,7 @@
 │                     用户 / User                         │
 │              ↑ HITL弹窗        自然语言请求 ↓           │
 └────────────────────────────────────────────────────────┘
-                          │
+                           │
 ┌────────────────────────────────────────────────────────┐
 │             前台同步层（目标：极速响应 <2s）              │
 │  ┌─────────────┐  ┌──────────────────┐  ┌───────────┐  │
@@ -71,7 +72,7 @@
 │  │  <50ms 检索 │  │  Soul Engine     │  │  Router   │  │
 │  └─────────────┘  └──────────────────┘  └───────────┘  │
 └────────────────────────────────────────────────────────┘
-         ↑ 实时检索回路                  ↓ 发布 Task
+          ↑ 实时检索回路                  ↓ 发布 Task
 ┌────────────────────────────────────────────────────────┐
 │           任务执行层（目标：可观测、可调度）              │
 │  ┌──────────────────────┐  ┌───────────────────────┐   │
@@ -83,7 +84,7 @@
 │                             │  Sub-agents 工具层   │    │
 │                             └─────────────────────┘    │
 └────────────────────────────────────────────────────────┘
-         ↓ 对话副本（异步）    ↓ 任务完成事件（异步）
+          ↓ 对话副本（异步）    ↓ 任务完成事件（异步）
 ┌────────────────────────────────────────────────────────┐
 │        后台异步进化层（目标：永不阻塞前台）               │
 │                 ┌────────────────┐                     │
@@ -103,12 +104,21 @@
 └────────────────────────────────────────────────────────┘
                           ↓ 写入
 ┌────────────────────────────────────────────────────────┐
-│                  持久化双轨记忆库                        │
-│  ┌───────────────────────┐  ┌──────────────────────┐   │
-│  │  Graph DB（偏好图谱）  │  │  Vector DB（经验语义） │   │
-│  └───────────────────────┘  └──────────────────────┘   │
+│                  三层记忆持久化存储                      │
+│  ┌─────────────────┐  ┌──────────────────┐  ┌────────┐  │
+│  │ MidTermMemory  │  │   Graph DB       │  │VectorDB│  │
+│  │  (中期记忆)    │  │  （长期偏好图谱） │  │(经验)  │  │
+│  └─────────────────┘  └──────────────────┘  └────────┘  │
 └────────────────────────────────────────────────────────┘
 ```
+
+### 三层记忆架构
+
+| 层级 | 存储 | 作用域 | 典型停留时间 |
+|------|------|--------|------------|
+| **短期** | SessionContextStore（Redis） | 当前 session | 对话结束即清除 |
+| **中期** | MidTermMemoryStore | 跨 session 近期上下文 | 确定性衰减/晋升/过期 |
+| **长期** | CoreMemory / GraphStore | 稳定内容 | 持久化，免疫衰减 |
 
 ---
 
@@ -118,9 +128,9 @@
 
 **职责**：在 LLM 推理前，以最低延迟将相关记忆注入 Context。
 
-#### 检索架构（两级流水线）
+#### 检索架构（三级流水线）
 
-> **精简说明**：移除 Cross-Encoder 强制 Rerank（Level 3），改为按需触发。ANN 结果置信度方差大时才走 Rerank，正常路径直接 Top K 截断，节省 30~50ms。
+> **v3.5 更新**：在 Session Context 之后新增 MidTermMemoryStore 跨 session 中期记忆层，填补"当前 session → 长期记忆"之间的上下文断层。
 
 ```
 用户输入
@@ -128,14 +138,33 @@
    ├─── Level 0：Core Memory 直接读取（内存）
    │    └─ 延迟：0ms（常驻内存，每次推理必定注入）
    │
-   ├─── Level 1：本地 LRU 缓存命中检测
-   │    └─ 延迟：<1ms（最近 100 条对话的检索结果缓存）
+   ├─── Level 1：SessionContextStore（当前 session 最近上下文）
+   │    └─ 延迟：<5ms（Redis，Session 级）
    │
-   ├─── Level 2：Vector DB ANN 粗排检索
+   ├─── Level 2：MidTermMemoryStore（跨 session 中期记忆）
+   │    └─ 延迟：<20ms（Redis，标注为"可能过时的跨 session 上下文"）
+   │    └─ 晋升规则：30天内 ≥3次提及、≥2个session、最近14天内仍活跃
+   │
+   ├─── Level 3：Vector DB ANN 粗排检索
    │    └─ 延迟：10~30ms（HNSW 索引，召回 Top 20，截取 Top 8）
    │
-   └─── Level 2.5（按需）：Cross-Encoder Rerank
+   └─── Level 3.5（按需）：Cross-Encoder Rerank
         └─ 仅当 Top 20 相似度方差 > 阈值时触发，延迟 30~50ms
+```
+
+#### 中期记忆（MidTermMemoryStore）
+
+```python
+MID_TERM_CONFIG = {
+    "decay_enabled": True,           # 确定性衰减
+    "expiry_days": 30,               # 30 天无访问后过期
+    "promotion_rule": {
+        "min_mentions": 3,           # 30 天内至少 3 次
+        "min_sessions": 2,           # 至少 2 个不同 session
+        "recency_days": 14,          # 最近 14 天内仍提及
+    },
+    "suppress_on_correction": True,  # 长期记忆被纠正时压制对应中期项
+}
 ```
 
 #### Core Memory 缓存策略
@@ -193,6 +222,10 @@ System Prompt
 
 Session Raw Context（当前 Session 最近 5 轮原文，≤800 tokens）
    └── 不依赖 Vector DB，解决 Observer 批处理延迟导致的近期对话检索缺失
+
+Mid-Term Context（跨 session 中期记忆，可能过时，LLM 需自行判断时效性）
+   └── 从 MidTermMemoryStore 召回，标注为"可能过时的跨 session 上下文"
+   └── 晋升触发：30天内3次提及 + 2个session + 最近14天仍活跃
 
 Retrieved Context（≤1200 tokens，按相关性排序）
    └── 相关经验 → 相关偏好 → 相关对话片段
@@ -1836,7 +1869,32 @@ class EvolutionJournal:
 
 ---
 
-## 6. 持久化双轨记忆库
+## 6. 持久化三层记忆库
+
+### MidTermMemoryStore（中期记忆层）
+
+**技术选型**：Redis（与 SessionContextStore 共用）
+
+```python
+@dataclass
+class MidTermEntry:
+    id: str
+    user_id: str
+    content: str
+    source_session_ids: list[str]      # 涉及的所有 session
+    mention_count: int                 # 30 天内总提及次数
+    last_mentioned_at: datetime
+    created_at: datetime
+    is_suppressed: bool = False         # 被长期记忆纠正后压制，避免重复晋升
+    decay_count: int = 0               # 已衰减次数（确定性衰减）
+```
+
+**晋升规则**：满足以下条件时触发 `lesson_generated` → `CognitionUpdater` 进入长期记忆：
+- 30 天内提及 ≥3 次
+- 涉及 ≥2 个不同 session
+- 最近 14 天内仍有提及
+
+**压制机制**：长期记忆被纠正/删除时，同步标记相关中期项 `is_suppressed=True`，防止过时内容重复晋升。
 
 ### Graph DB
 
@@ -1961,38 +2019,42 @@ Observer 引擎                     元认知反思器
    ↓                                   ├──→ 认知进化器（统一）
 Graph DB + Vector DB               ↓   │    └→ Self Cognition 更新
 （偏好·关系·片段）             Lesson  │    └→ World Model → Graph DB
-                               生成   │
-                                       └──→ 人格进化器（双速）
-                                             ├→ 快适应：Session 内即时行为规则
-                                             └→ 慢进化：规则晋升 + Traits 微调
-                                             └→ 漂移检测
-                                                 │
-                                           ┌─────┴──────┐
-                                        正常写入       漂移回滚
-                                           │
-                                           ↓
-                             Core Memory 写入调度器
-                             （Token 预算管理·CAS 写入）
-                                           │
-                                           ↓
-                             缓存刷新（立即生效）
-                                           │
-                                           ↓
-                             下次推理：新 Core Memory + 行为规则 注入 System Prompt
-                                           │
-                             EvolutionJournal 记录所有进化事件
-                             （用户可查 / AI 可引用）
+                                生成   │
+                                        └──→ 人格进化器（双速）
+                                              ├→ 快适应：Session 内即时行为规则
+                                              └→ 慢进化：规则晋升 + Traits 微调
+                                              └→ 漂移检测
+                                                  │
+                                            ┌─────┴──────┐
+                                         正常写入       漂移回滚
+                                            │
+                                            ↓
+                              Core Memory 写入调度器
+                              （Token 预算管理·CAS 写入）
+                                            │
+                                            ↓
+                              缓存刷新（立即生效）
+                                            │
+                                            ↓
+                              下次推理：新 Core Memory + 行为规则 注入 System Prompt
+                                            │
+                              EvolutionJournal 记录所有进化事件
+                              （用户可查 / AI 可引用）
+
+中期记忆晋升链路（v3.5 新增）
+─────────────────────────────────────────────
+   MidTermMemoryStore（跨 session 中期）
+         │
+         │ 晋升条件：30天内≥3次 + ≥2session + 最近14天仍提及
+         ↓
+   lesson_generated 事件
+         │
+         ↓
+   CognitionUpdater（与长期记忆同流程）
+         │
+         ├→ 写入 CoreMemory / GraphStore
+         └→ 压制 MidTermMemoryStore 中对应项（is_suppressed=True）
 ```
-
-**协同顺序约束**（链式触发，显式保证执行顺序）：
-
-> **v3.3 变更**：从隐式的 EventBus 订阅顺序改为显式的链式事件触发，消除对注册顺序的脆弱依赖。
-
-1. `dialogue_ended` → 同时触发 Observer 和 SignalExtractor（并行，无依赖）
-2. Observer 完成后 emit `observation_done` → 触发元认知反思器
-3. 元认知反思器归因后 emit `lesson_generated` → 触发认知进化器
-4. 认知进化信号传递给人格进化器（认知升级 → 人格校准）
-5. 所有更新汇总至 Core Memory 调度器，统一写入
 
 ---
 
@@ -2049,6 +2111,7 @@ class IdempotentWriter:
 | 人格快适应 | 每 1~3 轮 | Session 级即时响应，不写入 Core Memory |
 | 人格慢进化 | 每 10 轮对话 1 次 | 规则晋升 + traits 微调 + 基调重生成 |
 | 成长日志 | 每次进化事件 | 记录所有变更，不限频 |
+| MidTermMemoryStore | 后台定时扫描 | 过期清除 + 确定性衰减 + 晋升检查 |
 
 ### 版本快照与回滚
 
@@ -2196,17 +2259,28 @@ CoreMemoryCache（刷新后）
 
 以下是 v3.0 相对 v2.2 的精简变更、v3.1 的细化更新、v3.2 的进化系统重构，以及 v3.4 的解耦补全与可实现性修复，每项均注明原因，方便后期回溯或恢复。
 
+### v3.5 中期记忆层（相对 v3.4）
+
+| 变更项 | v3.4 方案 | v3.5 方案 | 原因 |
+|--------|----------|----------|------|
+| **跨 session 上下文** | 仅靠 SessionContextStore（当前 session）和 Vector DB（长期） | 新增 MidTermMemoryStore 中期层，填补断层 | 跨 session 近期上下文无法被有效召回 |
+| **中期记忆检索** | 无 | SoulEngine 在 session context 之后读取 cross-session context，标注为"可能过时的跨 session 上下文" | 让 LLM 自行判断时效性 |
+| **晋升规则** | 无 | 30天内≥3次 + ≥2session + 最近14天仍提及 → 触发 lesson_generated → CognitionUpdater | 渐进式沉淀，避免短期噪音进入长期记忆 |
+| **衰减与过期** | 无 | 确定性衰减 + 30 天无访问过期 | 控制中期记忆总量，防止无限膨胀 |
+| **压制机制** | 无 | 长期记忆纠正/删除时同步压制相关中期项 `is_suppressed=True` | 防止过时内容重复晋升 |
+| **治理 API** | 无 MidTermMemoryStore 接口 | GET /memory/mid-term、POST /memory/mid-term/delete、GET /memory?include_mid_term=true | 支持管理和调试中期记忆 |
+
 ### v3.4 解耦补全与可实现性修复（相对 v3.3）
 
 | 变更项 | v3.3 方案 | v3.4 方案 | 原因 |
 |--------|----------|----------|------|
-| **模型 Provider 抽象** | 仅在“外部服务依赖”里笼统写可替换 | 新增 `ModelSpec / ChatModel / EmbeddingModel / RerankerModel / ModelProviderRegistry` | 将“可替换”落到正式接口，业务代码不再依赖具体厂商 SDK |
-| **OpenAI 类型语义** | `OpenAI` 容易被误解为厂商 | 明确为 `openai_compatible` 协议族；`vendor` 单独配置为 `openai / minimax / oneapi / vllm` | 满足“Provider 是 OpenAI 类型但底层不一定是 OpenAI 模型”的要求 |
-| **Embedding 接口** | 只有“Embedding API 可替换”描述 | 独立出 Embedding Provider 端口，并给出 `openai_compatible / ollama` 路由示例 | 支持检索、规则去重、索引构建统一切换到 OpenAI 接口或 Ollama |
+| **模型 Provider 抽象** | 仅在"外部服务依赖"里笼统写可替换 | 新增 `ModelSpec / ChatModel / EmbeddingModel / RerankerModel / ModelProviderRegistry` | 将"可替换"落到正式接口，业务代码不再依赖具体厂商 SDK |
+| **OpenAI 类型语义** | `OpenAI` 容易被误解为厂商 | 明确为 `openai_compatible` 协议族；`vendor` 单独配置为 `openai / minimax / oneapi / vllm` | 满足"Provider 是 OpenAI 类型但底层不一定是 OpenAI 模型"的要求 |
+| **Embedding 接口** | 只有"Embedding API 可替换"描述 | 独立出 Embedding Provider 端口，并给出 `openai_compatible / ollama` 路由示例 | 支持检索、规则去重、索引构建统一切换到 OpenAI 接口或 Ollama |
 | **Platform 预留接口** | 只有 HITL / User 概念，没有正式端口 | 新增 `PlatformAdapter + PlatformContext + InboundMessage + OutboundMessage + HitlRequest` | 平台暂不实现，但核心链路已预留稳定接口 |
 | **ActionRouter → Blackboard** | `assign(task, best_agent)` 与 `assign(task)` 签名不一致 | 统一改为先写 `task.assigned_to`，再调用 `assign(task)` | 修复实现级别接口不一致 |
-| **HITL 流程** | 高风险权限通过 `on_task_failed()` 进入失败态 | 新增 `waiting_hitl` 状态和 `on_task_waiting_hitl()` | 修复“等待用户授权”被误标为失败的问题 |
-| **Core Memory 多租户写入** | `core_memory:{block}` 未带 user_id | 改为 `core_memory:{user_id}:{block}`，缓存失效同步改为 `invalidate(user_id)` | 与“Core Memory per-user”语义保持一致 |
+| **HITL 流程** | 高风险权限通过 `on_task_failed()` 进入失败态 | 新增 `waiting_hitl` 状态和 `on_task_waiting_hitl()` | 修复"等待用户授权"被误标为失败的问题 |
+| **Core Memory 多租户写入** | `core_memory:{block}` 未带 user_id | 改为 `core_memory:{user_id}:{block}`，缓存失效同步改为 `invalidate(user_id)` | 与"Core Memory per-user"语义保持一致 |
 | **损坏文档段落** | `5.2` 与 `5.3` 混杂截断 | 重写 `Observer / MetaCognitionReflector` 两节 | 保证文档本身可读、可实现 |
 
 ### v3.0 精简变更（相对 v2.2）

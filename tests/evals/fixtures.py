@@ -16,6 +16,7 @@ from app.evolution import (
 )
 from app.memory import CoreMemory, MemoryGovernanceService
 from app.memory.core_memory import BehavioralRule
+from app.memory.mid_term_memory import MidTermMemoryStore
 from app.platform.base import InboundMessage, PlatformContext
 from app.stability.snapshot import PersonalitySnapshotStore
 from app.soul import SoulEngine
@@ -183,6 +184,7 @@ class EvalHarness:
             core_memory=self.core_memory,
             recent_messages=[],
             session_adaptations_live=[],
+            mid_term_memories=[],
             retrieved={"matches": []},
             emotional_context=emotional_context,
             support_policy=support_policy,
@@ -223,10 +225,15 @@ def build_eval_harness() -> EvalHarness:
     graph_store = RecordingGraphStore()
     candidate_manager = EvolutionCandidateManager(journal)
     snapshot_store = PersonalitySnapshotStore()
+    governance_mid_term_store = MidTermMemoryStore(dsn="")
+    governance_mid_term_store.degraded = True
+    governance_mid_term_store.degraded_reason = "test_memory_only"
+    governance_mid_term_store.storage_source = "memory_fallback"
     governance_service = MemoryGovernanceService(
         core_memory_cache=cache,
         core_memory_scheduler=scheduler,
         graph_store=graph_store,
+        mid_term_memory_store=governance_mid_term_store,
         candidate_manager=candidate_manager,
         evolution_journal=journal,
     )
@@ -258,10 +265,15 @@ def build_eval_harness() -> EvalHarness:
         relationship_state_machine=relationship_state_machine,
         memory_governance_service=governance_service,
     )
+    soul_mid_term_store = MidTermMemoryStore(dsn="")
+    soul_mid_term_store.degraded = True
+    soul_mid_term_store.degraded_reason = "test_memory_only"
+    soul_mid_term_store.storage_source = "memory_fallback"
     soul_engine = SoulEngine(
         model_registry=DummyModelRegistry(api_key=None),
         core_memory_cache=cache,
         session_context_store=session_store,
+        mid_term_memory_store=soul_mid_term_store,
         vector_retriever=vector_retriever,
         tool_registry=DummyToolCatalog(),
         proactivity_service=proactivity_service,

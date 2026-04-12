@@ -22,6 +22,10 @@ app.include_router(prompts_router)
 
 @app.get("/health")
 async def health() -> dict[str, object]:
+    runtime = getattr(app.state, "runtime", None)
+    runtime_health_async = getattr(runtime, "health_snapshot_async", None)
+    if callable(runtime_health_async):
+        return await runtime_health_async()
     runtime_health = getattr(app.state, "runtime_health", None)
     if callable(runtime_health):
         return runtime_health()

@@ -13,6 +13,7 @@ from app.evolution.cognition_updater import CognitionUpdater
 from app.evolution.core_memory_scheduler import CoreMemoryScheduler
 from app.evolution.event_bus import Event, EventBus, EventType, EvolutionEntry, InteractionSignal, RedisStreamsEventBus
 from app.evolution.evolution_journal import EvolutionJournal
+from app.evolution.mid_term_memory import MidTermMemoryExtractor
 from app.evolution.observer import ObserverEngine
 from app.evolution.personality_evolver import PersonalityEvolver
 from app.evolution.proactivity import GentleProactivityService, ProactivityDecision
@@ -39,6 +40,7 @@ __all__ = [
     "EvolutionSubmissionResult",
     "InMemoryEventBus",
     "InteractionSignal",
+    "MidTermMemoryExtractor",
     "MetaCognitionReflector",
     "ObserverEngine",
     "PersonalityEvolver",

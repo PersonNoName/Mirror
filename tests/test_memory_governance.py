@@ -8,6 +8,7 @@ from app.evolution import CognitionUpdater, EvolutionCandidateManager, Evolution
 from app.memory import CoreMemory, FactualMemory, InferredMemory, MemoryGovernanceService, RelationshipMemory
 from app.memory.core_memory_store import _core_memory_from_dict
 from app.tasks.models import Lesson
+from tests.conftest import DummyMidTermMemoryStore
 
 
 class DummyCoreMemoryCache:
@@ -76,6 +77,7 @@ async def test_memory_governance_lists_durable_and_candidate_memory() -> None:
         core_memory_cache=DummyCoreMemoryCache(core_memory),
         core_memory_scheduler=RecordingScheduler(core_memory),
         graph_store=RecordingGraphStore(),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
         candidate_manager=manager,
         evolution_journal=EvolutionJournal(),
     )
@@ -101,6 +103,7 @@ async def test_memory_governance_corrects_inference_into_user_confirmed_fact() -
         core_memory_cache=DummyCoreMemoryCache(core_memory),
         core_memory_scheduler=scheduler,
         graph_store=RecordingGraphStore(),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
         candidate_manager=EvolutionCandidateManager(EvolutionJournal()),
         evolution_journal=EvolutionJournal(),
     )
@@ -142,6 +145,7 @@ async def test_memory_governance_correction_supersedes_all_active_duplicates_for
         core_memory_cache=DummyCoreMemoryCache(core_memory),
         core_memory_scheduler=RecordingScheduler(core_memory),
         graph_store=RecordingGraphStore(),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
         candidate_manager=EvolutionCandidateManager(EvolutionJournal()),
         evolution_journal=EvolutionJournal(),
     )
@@ -187,6 +191,7 @@ async def test_memory_governance_delete_marks_relationship_deleted_and_reverts_c
         core_memory_cache=DummyCoreMemoryCache(core_memory),
         core_memory_scheduler=RecordingScheduler(core_memory),
         graph_store=graph_store,
+        mid_term_memory_store=DummyMidTermMemoryStore(),
         candidate_manager=manager,
         evolution_journal=EvolutionJournal(),
     )
@@ -208,6 +213,7 @@ async def test_cognition_updater_respects_blocked_support_preference_learning() 
         core_memory_cache=DummyCoreMemoryCache(core_memory),
         core_memory_scheduler=scheduler,
         graph_store=RecordingGraphStore(),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
         candidate_manager=manager,
         evolution_journal=EvolutionJournal(),
     )
@@ -259,6 +265,7 @@ async def test_memory_governance_prunes_expired_inference_and_pending_memory() -
         core_memory_cache=DummyCoreMemoryCache(core_memory),
         core_memory_scheduler=RecordingScheduler(core_memory),
         graph_store=RecordingGraphStore(),
+        mid_term_memory_store=DummyMidTermMemoryStore(),
         candidate_manager=EvolutionCandidateManager(EvolutionJournal()),
         evolution_journal=EvolutionJournal(),
     )
