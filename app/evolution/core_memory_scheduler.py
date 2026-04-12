@@ -25,12 +25,13 @@ from app.providers.openai_compat import ProviderRequestError
 class CoreMemoryScheduler:
     """Serialize core-memory writes and enforce approximate budget limits."""
 
-    TOTAL_TOKEN_BUDGET = 5000
+    TOTAL_TOKEN_BUDGET = 5500
     BLOCK_BUDGETS = {
         "self_cognition": 1000,
         "world_model": 1000,
         "personality": 800,
         "task_experience": 1200,
+        "agent_emotional_state": 500,
     }
     DYNAMIC_RESERVE = 1000
 

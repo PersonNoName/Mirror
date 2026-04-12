@@ -518,8 +518,8 @@ def test_emotional_carryover_survives_new_session_until_it_expires() -> None:
         carryover_until="2026-04-18T00:00:00+00:00",
     )
 
-    emotional_context = SoulEngine._interpret_emotion("hello again", core_memory)
-    policy = SoulEngine._build_support_policy("hello again", core_memory, emotional_context)
+    emotional_context = SoulEngine._interpret_emotion("how is your family doing", core_memory)
+    policy = SoulEngine._build_support_policy("how is your family doing", core_memory, emotional_context)
 
     assert emotional_context.emotion_class == "sadness"
     assert emotional_context.duration_hint == "carryover"

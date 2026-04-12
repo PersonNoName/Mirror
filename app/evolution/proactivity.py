@@ -11,6 +11,7 @@ from typing import Any
 from app.evolution.event_bus import EvolutionEntry
 from app.memory.core_memory import (
     AgentContinuityState,
+    AgentEmotionalState,
     CoreMemory,
     ProactivityOpportunity,
     ProactivityPreference,
@@ -134,6 +135,20 @@ class GentleProactivityService:
         if preference == "suppress":
             state.last_suppression_reason = "user_preference_suppressed"
             return self._decision(False, "user_preference_suppressed", stage, preference)
+
+        # Emotional trigger: agent misses user even when no topic-based opportunity exists
+        agent_emotional_state = current.agent_emotional_state
+        miss_decision = self._check_miss_user_trigger(
+            agent_emotional_state=agent_emotional_state,
+            state=state,
+            policy=policy,
+            stage=stage,
+            preference=preference,
+            now=now,
+        )
+        if miss_decision is not None:
+            return miss_decision
+
         if not opportunities:
             return self._decision(False, "no_pending_topic", stage, preference)
 
@@ -509,6 +524,51 @@ class GentleProactivityService:
         return (
             f"Earlier you mentioned {opportunity.conservative_reference}. "
             "No pressure to reply, but I wanted to check in on how that's going."
+        )
+
+    @staticmethod
+    def _check_miss_user_trigger(
+        *,
+        agent_emotional_state: AgentEmotionalState,
+        state: ProactivityState,
+        policy: Any,
+        stage: str,
+        preference: str,
+        now: datetime | None = None,
+    ) -> ProactivityDecision | None:
+        """Return eligible decision if agent misses the user based on absence threshold."""
+        threshold = agent_emotional_state.miss_user_after_hours
+        last_at = _parse_iso(agent_emotional_state.last_interaction_at)
+        if threshold <= 0 or last_at is None:
+            return None
+        if last_at.tzinfo is None:
+            last_at = last_at.replace(tzinfo=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        hours_since = (current - last_at).total_seconds() / 3600
+        if hours_since < threshold:
+            return None
+        # Respect basic guards: stage must be at least trust_building
+        if stage in {"unfamiliar", "repair_and_recovery"}:
+            return None
+        # Respect global interval throttle
+        if state.last_proactive_at:
+            last_proactive = _parse_iso(state.last_proactive_at)
+            if last_proactive is not None:
+                if last_proactive.tzinfo is None:
+                    last_proactive = last_proactive.replace(tzinfo=timezone.utc)
+                if last_proactive > current - timedelta(hours=policy.min_interval_hours):
+                    return None
+        draft = "It's been a while since we last talked — just wanted to say hi. No pressure to reply."
+        return ProactivityDecision(
+            eligible=True,
+            reason="agent_misses_user",
+            topic_key="miss_user",
+            draft_message=draft,
+            importance="medium",
+            relationship_stage=stage,
+            stored_preference=preference,
+            conservative_reference="",
+            session_id="",
         )
 
     @staticmethod

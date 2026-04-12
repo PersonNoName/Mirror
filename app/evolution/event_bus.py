@@ -45,6 +45,24 @@ class EventType:
         }
     )
 
+    # Semantic categories – used for filtering and documentation.
+    DOMAIN_EVENTS = frozenset(
+        {
+            DIALOGUE_ENDED,
+            HITL_FEEDBACK,
+            TASK_COMPLETED,
+            TASK_FAILED,
+            TASK_WAITING_HITL,
+        }
+    )
+    PIPELINE_EVENTS = frozenset(
+        {
+            OBSERVATION_DONE,
+            LESSON_GENERATED,
+            EVOLUTION_DONE,
+        }
+    )
+
 
 EVENT_STREAMS = {
     EventType.DIALOGUE_ENDED: "stream:event:dialogue",

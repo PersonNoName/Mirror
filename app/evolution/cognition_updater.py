@@ -13,10 +13,13 @@ from app.evolution.candidate_pipeline import (
 )
 from app.memory.core_memory import (
     AgentContinuityState,
+    AgentEmotionalState,
     DurableMemory,
     FactualMemory,
     InferredMemory,
     RelationshipMemory,
+    SharedExperience,
+    TopicAffinity,
     UserEmotionalState,
     utc_now_iso,
 )
@@ -279,6 +282,12 @@ class CognitionUpdater:
             return
         if lesson.domain == "agent_continuity":
             await self._apply_agent_continuity_state(lesson)
+            return
+        if lesson.domain == "agent_emotional":
+            await self._apply_agent_emotional_state(lesson)
+            return
+        if lesson.domain == "shared_experience":
+            await self._apply_shared_experience(lesson)
             return
         candidate = self._classify_memory(lesson)
         if self.memory_governance_service is not None:
@@ -926,24 +935,33 @@ class CognitionUpdater:
     def _merge_memory(existing: list[Any], candidate: Any) -> list[Any]:
         merged: list[Any] = []
         replaced = False
+        candidate_key = getattr(candidate, "memory_key", "") or ""
         for item in existing:
-            if getattr(item, "memory_key", "") == getattr(candidate, "memory_key", ""):
+            item_key = getattr(item, "memory_key", "") or ""
+            if candidate_key and item_key == candidate_key:
+                # Existing confirmed item beats unconfirmed candidate → keep existing, drop candidate.
                 if getattr(item, "confirmed_by_user", False) and not getattr(
                     candidate, "confirmed_by_user", False
                 ):
                     merged.append(item)
+                    replaced = True
                     continue
+                # Both confirmed → supersede old, add new below.
                 if getattr(candidate, "confirmed_by_user", False) and getattr(
                     item, "confirmed_by_user", False
                 ):
                     item.status = "superseded"
                     merged.append(item)
+                    merged.append(candidate)
+                    replaced = True
+                    continue
+                # Otherwise (e.g. both unconfirmed, or candidate confirmed + item not) → replace old with new.
+                merged.append(candidate)
                 replaced = True
                 continue
             merged.append(item)
-        merged.append(candidate)
         if not replaced:
-            return merged
+            merged.append(candidate)
         return merged
 
     @staticmethod
@@ -992,6 +1010,108 @@ class CognitionUpdater:
             ),
             "emotional_risk": lesson.details.get("emotional_risk"),
         }
+
+    async def _apply_agent_emotional_state(self, lesson: Lesson) -> None:
+        """Update the agent's own emotional state based on interaction signals."""
+        current = deepcopy(await self.core_memory_cache.get(lesson.user_id))
+        previous = current.agent_emotional_state
+        details = dict(lesson.details)
+        now = utc_now_iso()
+
+        mood = str(details.get("mood", previous.mood or "neutral"))
+        mood_intensity = str(details.get("mood_intensity", previous.mood_intensity or "low"))
+        toward_user = str(details.get("toward_user", previous.toward_user or "neutral"))
+        toward_user_intensity = str(details.get("toward_user_intensity", previous.toward_user_intensity or "low"))
+
+        # Merge curiosity topics (keep max 5)
+        new_curiosity = list(details.get("curiosity_topics", []))
+        merged_curiosity = list(new_curiosity)
+        for topic in previous.curiosity_topics:
+            if topic and topic not in merged_curiosity:
+                merged_curiosity.append(topic)
+        merged_curiosity = merged_curiosity[:5]
+
+        # Merge topic affinities (update existing, append new, keep max 8)
+        new_affinities_raw = list(details.get("topic_affinities", []))
+        existing_map = {a.topic: a for a in previous.topic_affinities}
+        for raw in new_affinities_raw:
+            topic = str(raw.get("topic", ""))
+            if not topic:
+                continue
+            if topic in existing_map:
+                a = existing_map[topic]
+                a.engagement_level = min(1.0, a.engagement_level + 0.1)
+                a.last_discussed_at = now
+                a.mention_count += 1
+                a.sentiment = str(raw.get("sentiment", a.sentiment))
+            else:
+                existing_map[topic] = TopicAffinity(
+                    topic=topic,
+                    engagement_level=float(raw.get("engagement_level", 0.5)),
+                    last_discussed_at=now,
+                    mention_count=1,
+                    sentiment=str(raw.get("sentiment", "positive")),
+                )
+        merged_affinities = sorted(
+            existing_map.values(),
+            key=lambda a: a.engagement_level,
+            reverse=True,
+        )[:8]
+
+        # Compute valence from mood
+        valence_map = {
+            "content": 0.5, "curious": 0.3, "warm": 0.6, "playful": 0.4,
+            "reflective": 0.1, "neutral": 0.0, "concerned": -0.2, "low": -0.4,
+        }
+        emotional_valence = valence_map.get(mood, 0.0)
+
+        current.agent_emotional_state = AgentEmotionalState(
+            mood=mood,
+            mood_intensity=mood_intensity,
+            toward_user=toward_user,
+            toward_user_intensity=toward_user_intensity,
+            emotional_valence=emotional_valence,
+            curiosity_topics=merged_curiosity,
+            topic_affinities=merged_affinities,
+            miss_user_after_hours=previous.miss_user_after_hours,
+            last_interaction_at=now,
+            mood_reason=str(details.get("mood_reason", previous.mood_reason or "")),
+            toward_user_reason=str(details.get("toward_user_reason", previous.toward_user_reason or "")),
+            updated_at=now,
+        )
+        await self.core_memory_scheduler.write(
+            lesson.user_id,
+            "agent_emotional_state",
+            current.agent_emotional_state,
+            event_id=lesson.id,
+        )
+
+    async def _apply_shared_experience(self, lesson: Lesson) -> None:
+        """Record a shared experience between agent and user."""
+        current = deepcopy(await self.core_memory_cache.get(lesson.user_id))
+        world_model = current.world_model
+        details = dict(lesson.details)
+
+        experience = SharedExperience(
+            summary=str(lesson.summary or lesson.lesson_text or "Shared moment"),
+            emotional_tone=str(details.get("emotional_tone", "neutral")),
+            topic_key=str(details.get("topic_key", lesson.domain or "")),
+            session_id=str(details.get("session_id", "")),
+            importance=details.get("importance", "medium"),
+            metadata={"lesson_id": lesson.id},
+        )
+
+        # Keep max 10 shared experiences, oldest dropped first
+        world_model.shared_experiences.append(experience)
+        if len(world_model.shared_experiences) > 10:
+            world_model.shared_experiences = world_model.shared_experiences[-10:]
+
+        await self.core_memory_scheduler.write(
+            lesson.user_id,
+            "world_model",
+            world_model,
+            event_id=lesson.id,
+        )
 
     @staticmethod
     def _explicit_preference_memory_key(relation: str, object_value: str) -> str:

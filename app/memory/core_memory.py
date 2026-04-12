@@ -27,6 +27,26 @@ ProactivityPreference = Literal["allow", "suppress", "unknown"]
 TopicImportance = Literal["low", "medium", "high"]
 ProactivityOpportunityStatus = Literal["pending", "sent", "suppressed"]
 ContinuityLevel = Literal["low", "medium", "high"]
+AgentMood = Literal[
+    "neutral",
+    "content",
+    "curious",
+    "warm",
+    "playful",
+    "reflective",
+    "concerned",
+    "low",
+]
+AgentTowardUser = Literal[
+    "neutral",
+    "caring",
+    "appreciative",
+    "curious",
+    "protective",
+    "missing",
+    "proud",
+    "worried",
+]
 
 
 def utc_now_iso() -> str:
@@ -264,6 +284,53 @@ class AgentContinuityState:
 
 
 @dataclass(slots=True)
+class TopicAffinity:
+    """Agent's emotional investment in a topic area."""
+
+    topic: str = ""
+    engagement_level: float = 0.5
+    last_discussed_at: str = ""
+    mention_count: int = 0
+    sentiment: str = "positive"
+
+
+@dataclass(slots=True)
+class AgentEmotionalState:
+    """Durable cross-session emotional state of the agent itself.
+
+    Unlike AgentContinuityState (operational caution / repair), this captures
+    the agent's subjective mood and feelings toward the user — enabling
+    emotionally expressive, companion-like behaviour.
+    """
+
+    mood: AgentMood = "neutral"
+    mood_intensity: ContinuityLevel = "low"
+    toward_user: AgentTowardUser = "neutral"
+    toward_user_intensity: ContinuityLevel = "low"
+    emotional_valence: float = 0.0  # -1.0 (negative) to 1.0 (positive)
+    curiosity_topics: list[str] = field(default_factory=list)
+    topic_affinities: list[TopicAffinity] = field(default_factory=list)
+    miss_user_after_hours: int = 72
+    last_interaction_at: str = ""
+    mood_reason: str = ""
+    toward_user_reason: str = ""
+    updated_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(slots=True)
+class SharedExperience:
+    """A memorable shared moment between agent and user."""
+
+    summary: str = ""
+    emotional_tone: str = "neutral"
+    topic_key: str = ""
+    session_id: str = ""
+    created_at: str = field(default_factory=utc_now_iso)
+    importance: TopicImportance = "medium"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class SelfCognition:
     """Persistent self-model maintained per user."""
 
@@ -287,6 +354,7 @@ class WorldModel:
     proactivity_state: ProactivityState = field(default_factory=ProactivityState)
     pending_confirmations: list[DurableMemory] = field(default_factory=list)
     memory_conflicts: list[DurableMemory] = field(default_factory=list)
+    shared_experiences: list[SharedExperience] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -322,6 +390,7 @@ class CoreMemory:
     task_experience: TaskExperience = field(default_factory=TaskExperience)
     user_emotional_state: UserEmotionalState = field(default_factory=UserEmotionalState)
     agent_continuity_state: AgentContinuityState = field(default_factory=AgentContinuityState)
+    agent_emotional_state: AgentEmotionalState = field(default_factory=AgentEmotionalState)
 
 
 class CoreMemoryCache:

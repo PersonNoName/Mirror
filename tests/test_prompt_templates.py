@@ -36,10 +36,14 @@ def test_soul_core_prompt_template_stays_isolated_from_auto_appended_context() -
         relationship_stage="stage",
         proactivity_policy="policy",
         emotional_context="emotion",
+        user_emotional_state="user_emotion",
+        agent_continuity_state="agent_continuity",
         support_policy="support",
         session_adaptations="session",
         task_experience="experience",
         tool_list="tools",
+        shared_experiences="experiences",
+        agent_emotional_state="agent_emotion",
     )
 
     assert "## Session Raw Context" not in prompt

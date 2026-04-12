@@ -2,6 +2,7 @@
 
 from app.memory.core_memory import (
     AgentContinuityState,
+    AgentEmotionalState,
     BehavioralRule,
     CapabilityEntry,
     CorePersonality,
@@ -23,7 +24,9 @@ from app.memory.core_memory import (
     RelationshipMemory,
     SessionAdaptation,
     SelfCognition,
+    SharedExperience,
     TaskExperience,
+    TopicAffinity,
     UserEmotionalState,
     WorldModel,
 )
@@ -37,6 +40,7 @@ from app.memory.vector_retriever import VectorRetriever
 __all__ = [
     "BehavioralRule",
     "AgentContinuityState",
+    "AgentEmotionalState",
     "CapabilityEntry",
     "CorePersonality",
     "CORE_MEMORY_INVALIDATION_CHANNEL",
@@ -63,7 +67,9 @@ __all__ = [
     "SessionAdaptation",
     "SessionContextStore",
     "SelfCognition",
+    "SharedExperience",
     "TaskExperience",
+    "TopicAffinity",
     "UserEmotionalState",
     "VectorRetriever",
     "WorldModel",

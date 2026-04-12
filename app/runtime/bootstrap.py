@@ -236,11 +236,10 @@ class RuntimeContext:
         }
 
 
-async def bootstrap_runtime() -> RuntimeContext:
-    """Create a fully wired runtime following the documented startup order."""
-
-    redis_client: Redis | None = None
-    startup_degraded_reasons: list[str] = []
+async def _wire_infrastructure(
+    startup_degraded_reasons: list[str],
+) -> tuple[Redis | None, TaskStore, OutboxStore, IdempotencyStore, EvolutionJournal, EvolutionCandidateManager | None]:
+    """Phase 1: Persistent stores, Redis connection, evolution journal."""
     task_store = TaskStore()
     await task_store.initialize()
     if task_store.degraded:
@@ -262,6 +261,7 @@ async def bootstrap_runtime() -> RuntimeContext:
         logger.warning("evolution_candidate_manager_degraded", reason="pipeline_initialization_failed")
         startup_degraded_reasons.append("evolution_pipeline_unavailable")
 
+    redis_client: Redis | None = None
     try:
         redis_client = Redis.from_url(settings.redis.url)
         await redis_client.ping()
@@ -270,7 +270,15 @@ async def bootstrap_runtime() -> RuntimeContext:
         logger.warning("redis_degraded", reason="redis_unavailable")
         startup_degraded_reasons.append("redis_unavailable")
 
-    model_registry = ModelProviderRegistry(build_routing_from_settings(settings))
+    return redis_client, task_store, outbox_store, idempotency_store, evolution_journal, evolution_candidate_manager
+
+
+async def _wire_memory(
+    redis_client: Redis | None,
+    model_registry: ModelProviderRegistry,
+    startup_degraded_reasons: list[str],
+) -> tuple[CoreMemoryStore, CoreMemoryCache, Any, MidTermMemoryStore, GraphStore | None, VectorRetriever | None]:
+    """Phase 2: All memory / retrieval subsystems."""
     core_memory_store = CoreMemoryStore()
     core_memory_cache = CoreMemoryCache(store=core_memory_store, redis_client=redis_client)
     session_context_store = SessionContextStore(redis_client) if redis_client is not None else _NullSessionContextStore()
@@ -299,28 +307,28 @@ async def bootstrap_runtime() -> RuntimeContext:
         startup_degraded_reasons.append("qdrant_unavailable")
 
     if startup_degraded_reasons:
-        logger.warning(
-            "runtime_startup_degraded",
-            reasons=startup_degraded_reasons,
-        )
+        logger.warning("runtime_startup_degraded", reasons=startup_degraded_reasons)
 
-    event_bus = RedisStreamsEventBus(
-        redis_client=redis_client,
-        outbox_store=outbox_store,
-        idempotency_store=idempotency_store,
-    )
-    task_system = TaskSystem(task_store=task_store, outbox_store=outbox_store, redis_client=redis_client)
-    blackboard = Blackboard(
-        task_store=task_store,
-        task_system=task_system,
-        agent_registry=agent_registry,
-        event_bus=event_bus,
-    )
-    outbox_relay = OutboxRelay(outbox_store=outbox_store, redis_client=redis_client)
-    task_monitor = TaskMonitor(task_store=task_store, blackboard=blackboard)
+    return core_memory_store, core_memory_cache, session_context_store, mid_term_memory_store, graph_store, vector_retriever
 
-    web_platform = WebPlatformAdapter()
-    chat_trace_service = ChatTraceService(emitter=getattr(web_platform, "emit_trace", None))
+
+def _wire_evolution(
+    *,
+    model_registry: ModelProviderRegistry,
+    core_memory_cache: CoreMemoryCache,
+    core_memory_store: CoreMemoryStore,
+    session_context_store: Any,
+    graph_store: GraphStore | None,
+    vector_retriever: VectorRetriever | None,
+    mid_term_memory_store: MidTermMemoryStore,
+    event_bus: RedisStreamsEventBus,
+    evolution_journal: EvolutionJournal,
+    evolution_candidate_manager: EvolutionCandidateManager | None,
+    task_store: TaskStore,
+    blackboard: Blackboard,
+    web_platform: WebPlatformAdapter,
+) -> dict[str, Any]:
+    """Phase 3: Evolution pipeline components."""
     circuit_breaker = AsyncCircuitBreaker()
     memory_governance_service = MemoryGovernanceService(
         core_memory_cache=core_memory_cache,
@@ -410,30 +418,33 @@ async def bootstrap_runtime() -> RuntimeContext:
         proactivity_service=proactivity_service,
         platform_adapter=web_platform,
     )
+    return {
+        "circuit_breaker": circuit_breaker,
+        "memory_governance_service": memory_governance_service,
+        "proactivity_service": proactivity_service,
+        "core_memory_scheduler": core_memory_scheduler,
+        "personality_evolver": personality_evolver,
+        "relationship_state_machine": relationship_state_machine,
+        "signal_extractor": signal_extractor,
+        "observer": observer,
+        "reflector": reflector,
+        "cognition_updater": cognition_updater,
+        "mid_term_memory_extractor": mid_term_memory_extractor,
+        "scheduler": scheduler,
+    }
 
-    builtins = register_builtin_tools(tool_registry)
 
-    soul_engine = SoulEngine(
-        model_registry=model_registry,
-        core_memory_cache=core_memory_cache,
-        session_context_store=session_context_store,
-        mid_term_memory_store=mid_term_memory_store,
-        vector_retriever=vector_retriever,
-        tool_registry=tool_registry,
-        hook_registry=hook_registry,
-        proactivity_service=proactivity_service,
-        trace_service=chat_trace_service,
-    )
-    action_router = ActionRouter(
-        platform_adapter=web_platform,
-        event_bus=event_bus,
-        blackboard=blackboard,
-        task_system=task_system,
-        tool_registry=tool_registry,
-        hook_registry=hook_registry,
-        trace_service=chat_trace_service,
-    )
-
+async def _wire_event_subscriptions(
+    event_bus: RedisStreamsEventBus,
+    observer: ObserverEngine,
+    signal_extractor: SignalExtractor,
+    proactivity_service: GentleProactivityService,
+    mid_term_memory_extractor: MidTermMemoryExtractor,
+    reflector: MetaCognitionReflector,
+    cognition_updater: CognitionUpdater,
+    personality_evolver: PersonalityEvolver,
+) -> None:
+    """Phase 4: Centralised event subscription wiring."""
     await event_bus.subscribe("dialogue_ended", observer.handle_dialogue_ended)
     await event_bus.subscribe("dialogue_ended", signal_extractor.handle_dialogue_ended)
     await event_bus.subscribe("dialogue_ended", proactivity_service.handle_dialogue_ended)
@@ -445,6 +456,16 @@ async def bootstrap_runtime() -> RuntimeContext:
         await event_bus.subscribe("hitl_feedback", cognition_updater.handle_hitl_feedback)
     if hasattr(personality_evolver, "handle_hitl_feedback"):
         await event_bus.subscribe("hitl_feedback", personality_evolver.handle_hitl_feedback)
+
+
+async def _wire_agents_and_tools(
+    task_store: TaskStore,
+    task_system: TaskSystem,
+    blackboard: Blackboard,
+    web_platform: WebPlatformAdapter,
+) -> tuple[dict[str, Any], SkillLoader, MCPToolAdapter, TaskWorkerManager, dict[str, Any], dict[str, Any]]:
+    """Phase 5: Agents, skills, MCP tools, task workers."""
+    builtins = register_builtin_tools(tool_registry)
 
     agent_registry.register(
         CodeAgent(task_store=task_store, blackboard=blackboard, task_system=task_system),
@@ -482,6 +503,103 @@ async def bootstrap_runtime() -> RuntimeContext:
             for agent in agent_registry.all()
         ]
     )
+    return {"loaded": builtins}, skill_loader, mcp_adapter, worker_manager, skill_summary, mcp_summary
+
+
+async def bootstrap_runtime() -> RuntimeContext:
+    """Create a fully wired runtime following the documented startup order."""
+
+    startup_degraded_reasons: list[str] = []
+
+    # --- Phase 1: Infrastructure ---
+    (redis_client, task_store, outbox_store, idempotency_store,
+     evolution_journal, evolution_candidate_manager) = await _wire_infrastructure(startup_degraded_reasons)
+
+    model_registry = ModelProviderRegistry(build_routing_from_settings(settings))
+
+    # --- Phase 2: Memory ---
+    (core_memory_store, core_memory_cache, session_context_store,
+     mid_term_memory_store, graph_store, vector_retriever) = await _wire_memory(
+        redis_client, model_registry, startup_degraded_reasons,
+    )
+
+    # --- Phase 3: Task & Event plumbing ---
+    event_bus = RedisStreamsEventBus(
+        redis_client=redis_client,
+        outbox_store=outbox_store,
+        idempotency_store=idempotency_store,
+    )
+    task_system = TaskSystem(task_store=task_store, outbox_store=outbox_store, redis_client=redis_client)
+    blackboard = Blackboard(
+        task_store=task_store,
+        task_system=task_system,
+        agent_registry=agent_registry,
+        event_bus=event_bus,
+    )
+    outbox_relay = OutboxRelay(outbox_store=outbox_store, redis_client=redis_client)
+    task_monitor = TaskMonitor(task_store=task_store, blackboard=blackboard)
+
+    web_platform = WebPlatformAdapter()
+    chat_trace_service = ChatTraceService(emitter=getattr(web_platform, "emit_trace", None))
+
+    # --- Phase 4: Evolution pipeline ---
+    evo = _wire_evolution(
+        model_registry=model_registry,
+        core_memory_cache=core_memory_cache,
+        core_memory_store=core_memory_store,
+        session_context_store=session_context_store,
+        graph_store=graph_store,
+        vector_retriever=vector_retriever,
+        mid_term_memory_store=mid_term_memory_store,
+        event_bus=event_bus,
+        evolution_journal=evolution_journal,
+        evolution_candidate_manager=evolution_candidate_manager,
+        task_store=task_store,
+        blackboard=blackboard,
+        web_platform=web_platform,
+    )
+
+    # --- Phase 5: Foreground engines ---
+    soul_engine = SoulEngine(
+        model_registry=model_registry,
+        core_memory_cache=core_memory_cache,
+        session_context_store=session_context_store,
+        mid_term_memory_store=mid_term_memory_store,
+        vector_retriever=vector_retriever,
+        tool_registry=tool_registry,
+        hook_registry=hook_registry,
+        proactivity_service=evo["proactivity_service"],
+        trace_service=chat_trace_service,
+    )
+    action_router = ActionRouter(
+        platform_adapter=web_platform,
+        event_bus=event_bus,
+        blackboard=blackboard,
+        task_system=task_system,
+        tool_registry=tool_registry,
+        hook_registry=hook_registry,
+        trace_service=chat_trace_service,
+    )
+
+    # --- Phase 6: Event subscriptions ---
+    await _wire_event_subscriptions(
+        event_bus=event_bus,
+        observer=evo["observer"],
+        signal_extractor=evo["signal_extractor"],
+        proactivity_service=evo["proactivity_service"],
+        mid_term_memory_extractor=evo["mid_term_memory_extractor"],
+        reflector=evo["reflector"],
+        cognition_updater=evo["cognition_updater"],
+        personality_evolver=evo["personality_evolver"],
+    )
+
+    # --- Phase 7: Agents, skills, tools, workers ---
+    builtins_summary, skill_loader, mcp_adapter, worker_manager, skill_summary, mcp_summary = await _wire_agents_and_tools(
+        task_store=task_store,
+        task_system=task_system,
+        blackboard=blackboard,
+        web_platform=web_platform,
+    )
 
     return RuntimeContext(
         redis_client=redis_client,
@@ -496,17 +614,17 @@ async def bootstrap_runtime() -> RuntimeContext:
         graph_store=graph_store,
         event_bus=event_bus,
         event_bus_event_factory=lambda event_type, payload: Event(type=event_type, payload=payload),
-        core_memory_scheduler=core_memory_scheduler,
+        core_memory_scheduler=evo["core_memory_scheduler"],
         evolution_journal=evolution_journal,
         evolution_candidate_manager=evolution_candidate_manager,
-        relationship_state_machine=relationship_state_machine,
-        proactivity_service=proactivity_service,
-        memory_governance_service=memory_governance_service,
-        personality_evolver=personality_evolver,
-        observer=observer,
-        reflector=reflector,
-        cognition_updater=cognition_updater,
-        evolution_scheduler=scheduler,
+        relationship_state_machine=evo["relationship_state_machine"],
+        proactivity_service=evo["proactivity_service"],
+        memory_governance_service=evo["memory_governance_service"],
+        personality_evolver=evo["personality_evolver"],
+        observer=evo["observer"],
+        reflector=evo["reflector"],
+        cognition_updater=evo["cognition_updater"],
+        evolution_scheduler=evo["scheduler"],
         task_store=task_store,
         task_system=task_system,
         blackboard=blackboard,
@@ -521,7 +639,7 @@ async def bootstrap_runtime() -> RuntimeContext:
         chat_trace_service=chat_trace_service,
         skill_summary=skill_summary,
         mcp_summary=mcp_summary,
-        builtins_summary={"loaded": builtins},
+        builtins_summary=builtins_summary,
         startup_degraded_reasons=startup_degraded_reasons,
     )
 
